@@ -138,6 +138,31 @@ class TestEngine(unittest.TestCase):
         code, _, _ = run_recipe(d, "import bisectlib as b\nb.test('false')\n")
         self.assertEqual(code, 1)  # BAD
 
+    def test_multiple_tests_and_together(self):
+        # several test() calls: all pass -> GOOD; a passing test continues
+        d = make_repo()
+        code, _, cache = run_recipe(
+            d, "import bisectlib as b\n"
+               "b.test('true')\nb.test('echo hi | grep -q hi')\nb.test('true')\n")
+        self.assertEqual(code, 0)
+        # all three ran and were recorded
+        ev = json.loads(next(Path(cache, "bisectlib").glob("*/*/eval.json")).read_text())
+        self.assertEqual([s["verb"] for s in ev["steps"]], ["test", "test", "test"])
+
+        # a later failing test makes the whole thing BAD
+        d2 = make_repo()
+        code2, _, _ = run_recipe(
+            d2, "import bisectlib as b\nb.test('true')\nb.test('false')\n")
+        self.assertEqual(code2, 1)
+
+        # the first failing test exits immediately (second never runs)
+        d3 = make_repo()
+        code3, _, cache3 = run_recipe(
+            d3, "import bisectlib as b\nb.test('false')\nb.test('true')\n")
+        self.assertEqual(code3, 1)
+        ev3 = json.loads(next(Path(cache3, "bisectlib").glob("*/*/eval.json")).read_text())
+        self.assertEqual(len(ev3["steps"]), 1)  # second test did not run
+
     def test_flaky_two_of_five(self):
         d = make_repo()
         # command passes its first 2 invocations, then fails -> 2/5

@@ -46,6 +46,16 @@ A passing step continues to the next line; a failing `test()` is **bad**, a
 broken `run()` **aborts** (or **skips** with `run(..., skip_on_error=True)`).
 Falling off the end is **good**. That is the whole mental model.
 
+Because passing steps continue, you can use **several `test()` calls** and they
+combine with logical AND — any one failing is **bad**, all passing is **good**:
+
+```python
+run("make")
+test("./unit_tests")                       # both must pass for the
+test("./integration_tests --quick")        # commit to count as good
+test("./bench", max_median=4.2, warmup=2)  # …and stay fast
+```
+
 ## The API
 
 | Verb | Meaning | On failure |

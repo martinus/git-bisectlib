@@ -20,7 +20,8 @@ Exit-code contract (what `git bisect run` reads):
 
 Verbs:
     run(cmd, skip_on_error=False, ...)   infrastructure; ABORTS on error by default
-    test(cmd, runs=1, need=None, ...)    the verdict; pass->good, fail->bad
+    test(cmd, runs=1, need=None, ...)    a verdict; pass->continue, fail->BAD.
+                                         Use several; they AND together.
     check(cmd) -> Result                 runs once, NEVER exits (for introspection)
     replace(path, old, new, ...)         sed-like edit, auto-reverted (clean tree)
     fixup(patch=/cherry_pick=, when=)    apply a patch/cherry-pick, auto-reverted
@@ -425,8 +426,12 @@ def test(cmd: str, *, runs: int = 1, need: Optional[int] = None,
          max_median: Optional[float] = None, warmup: int = 0,
          bad_when: str = "fail", passed: Optional[Callable[[Result], bool]] = None,
          timeout: Optional[float] = None, on_timeout: str = "skip",
-         name: Optional[str] = None) -> "NoReturn":  # type: ignore[name-defined]
-    """The verdict step. Pass -> GOOD (continue), fail -> BAD (exit 1).
+         name: Optional[str] = None) -> Optional[Result]:
+    """A verdict step. Good -> continue; bad -> exit 1 (BAD).
+
+    Like ``run``, a *passing* test continues to the next line, so you can have
+    several ``test`` calls and they combine with logical AND — any one failing is
+    BAD; reaching the end of the recipe is GOOD. Returns the last Result on good.
 
     runs/need express flakiness ("2 of 5"); max_median adds a perf gate; both
     combine with logical AND. bad_when="pass" inverts the bug direction.
@@ -485,7 +490,9 @@ def test(cmd: str, *, runs: int = 1, need: Optional[int] = None,
     _echo_result("test", cmd, good, last.seconds if last else 0.0,
                  "good" if good else "bad")
     sys.stderr.write(f"   {summary}\n")
-    _decide(GOOD if good else BAD)
+    if not good:
+        _decide(BAD)
+    return last  # good: continue to the next step (multiple tests AND together)
 
 
 def check(cmd: str, *, timeout: Optional[float] = None) -> Result:

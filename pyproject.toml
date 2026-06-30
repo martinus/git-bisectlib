@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bisectlog"
+version = "0.1.0"
+description = "Automated git bisect: render bisect sessions (bisectlog) and write bisect recipes (bisectlib)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Martin Leitner-Ankerl", email = "martin.ankerl@gmail.com" }]
+keywords = ["git", "bisect", "regression", "testing", "ci"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+
+[project.urls]
+Homepage = "https://github.com/martinus/bisectlog"
+
+[project.scripts]
+bisectlog = "bisectlog:main"
+git-bisectlog = "bisectlog:main"
+
+[tool.setuptools]
+py-modules = ["bisectlog", "bisectlib"]

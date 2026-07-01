@@ -290,6 +290,24 @@ class TestEngine(unittest.TestCase):
         code2, _, _ = run_recipe(d, body2)
         self.assertEqual(code2, 0)
 
+    def test_verdict_primitives(self):
+        d = make_repo()
+        # decide from Python after measuring with check()
+        good = ("import bisectlib as b\n"
+                "n = int(b.check('echo 3').out)\n"
+                "if n > 5: b.bad('too big')\n")   # 3 <= 5 -> fall through -> good
+        code, _, _ = run_recipe(d, good)
+        self.assertEqual(code, 0)
+        bad = ("import bisectlib as b\n"
+               "n = int(b.check('echo 9').out)\n"
+               "if n > 5: b.bad('too big')\n")    # 9 > 5 -> bad
+        code2, _, _ = run_recipe(d, bad)
+        self.assertEqual(code2, 1)
+        # skip() and explicit good()/abort()
+        self.assertEqual(run_recipe(d, "import bisectlib as b\nb.skip()\n")[0], 125)
+        self.assertEqual(run_recipe(d, "import bisectlib as b\nb.good()\nb.bad()\n")[0], 0)
+        self.assertEqual(run_recipe(d, "import bisectlib as b\nb.abort()\n")[0], 128)
+
     def test_check_does_not_exit(self):
         d = make_repo()
         body = ("import bisectlib as b\n"

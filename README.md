@@ -65,6 +65,16 @@ test("./bench", attempts=5, min_passes=1,           # …and the fastest of 5
 | `run(cmd, skip_on_error=False)` | infrastructure (configure/build/setup) | **abort** (or skip) |
 | `test(cmd, attempts=1, min_passes=None, passed=None, warmup=0, bad_when="fail")` | the verdict | **bad** |
 | `check(cmd) -> Result` | run once, **never exits** (introspection: `.ok`, `.out`, `.seconds`) | — |
+| `good()` / `bad()` / `skip()` / `abort()` | decide the commit **directly from Python** | — |
+
+The verdict primitives let you decide from arbitrary Python after measuring something with
+`check()` — no need to shell back out to `test` just to compare values:
+
+```python
+size = int(check("stat -c%s build/app").out)
+if size > 5 * 1024 * 1024:
+    bad("binary too big")     # exit 1; reaching the end instead would be good
+```
 
 All three verbs accept **`cwd=`** to set the working directory for the command (relative
 paths resolve against the repo root, so `cwd="build"` means `<repo>/build`; absolute paths

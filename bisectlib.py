@@ -23,6 +23,8 @@ Verbs:
     test(cmd, attempts=1, min_passes=None,…)  a verdict; pass->continue, fail->BAD.
                                               Use several; they AND together.
     check(cmd) -> Result                      runs once, NEVER exits (introspection)
+    good()/bad()/skip()/abort()               decide the commit directly from Python
+                                              (e.g. after measuring with check())
     replace(path, old, new, ...)         sed-like edit, auto-reverted (clean tree)
     fixup(patch=/cherry_pick=, when=)    apply a patch/cherry-pick, auto-reverted
 """
@@ -433,6 +435,43 @@ def _decide(outcome_code: int, reason: str = "") -> "NoReturn":  # type: ignore[
     _final["outcome"] = _OUTCOME_NAME[outcome_code]
     _final["code"] = outcome_code
     sys.exit(outcome_code)
+
+
+def _verdict(code: int, msg: str) -> "NoReturn":  # type: ignore[name-defined]
+    _announce()
+    label = _OUTCOME_NAME[code]
+    if _use_color():
+        sys.stderr.write(f"{_C.get(label, '')}● {label}{_C['reset']} {msg}\n")
+    else:
+        sys.stderr.write(f"● {label} {msg}\n")
+    sys.stderr.flush()
+    _decide(code)
+
+
+# Explicit verdict primitives — decide the current commit straight from Python
+# (e.g. after measuring something with check()), no shell command needed:
+#     size = int(check("stat -c%s build/app").out)
+#     if size > 5 * 1024 * 1024:
+#         bad("binary too big")
+# Each exits the process immediately; reaching the end of the recipe is good.
+def good(msg: str = "") -> "NoReturn":   # type: ignore[name-defined]
+    """Declare this commit GOOD (exit 0) now — short-circuit the rest of the recipe."""
+    _verdict(GOOD, msg)
+
+
+def bad(msg: str = "") -> "NoReturn":    # type: ignore[name-defined]
+    """Declare this commit BAD (exit 1) now — the bug is present."""
+    _verdict(BAD, msg)
+
+
+def skip(msg: str = "") -> "NoReturn":   # type: ignore[name-defined]
+    """SKIP this commit (exit 125) — it can't be judged, route around it."""
+    _verdict(SKIP, msg)
+
+
+def abort(msg: str = "") -> "NoReturn":  # type: ignore[name-defined]
+    """ABORT the bisect (exit 128) — harness broken; state kept, fix & resume."""
+    _verdict(ABORT, msg)
 
 
 # -------------------------------------------------------------------- run/test

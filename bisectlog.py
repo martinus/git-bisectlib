@@ -25,6 +25,7 @@ import os
 import shlex
 import subprocess
 import sys
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -687,6 +688,52 @@ def _render_detail_html(r: Row) -> str:
     return "".join(parts)
 
 
+# --------------------------------------------------------------- terminal table
+_ANSI = {"good": "32", "bad": "31", "skip": "33", "todo": "34", "abort": "91",
+         "sha": "36", "dim": "2", "bold": "1"}
+_MARK = {"good": "✓", "bad": "✗", "skip": "⊘", "todo": "…", "abort": "■"}
+
+
+def render_terminal(rep: Report, color: bool = True, width: Optional[int] = None) -> str:
+    """A compact, aligned, colored one-line-per-evaluation table for the terminal."""
+    def c(s: str, key: str) -> str:
+        return f"\033[{_ANSI[key]}m{s}\033[0m" if color and key in _ANSI else s
+
+    if width is None:
+        width = shutil.get_terminal_size((100, 24)).columns
+
+    out: list[str] = []
+    og = rep.short(rep.orig_goods[0]) if rep.orig_goods else "—"
+    ob = rep.short(rep.orig_bad)
+    head = (f"bisect  {c(rep.good_term, 'good')} {c(og, 'sha')}  "
+            f"{c(rep.bad_term, 'bad')} {c(ob, 'sha')}")
+    out.append(c(head, "bold") if color else head)
+
+    if rep.first_bad:
+        subj = rep.subject(rep.first_bad)
+        out.append(c(f"🎯 first bad commit  {rep.short(rep.first_bad)}  {subj}", "bad"))
+    elif (resume := resume_command(rep)):
+        out.append(c(f"resume: {resume}", "dim"))
+    if rep.note:
+        out.append(c(f"! {rep.note}", "skip"))
+    out.append("")
+
+    # columns: status(4) sha(9) range(>4) subject(rest)
+    sw = max((len(r.status) for r in rep.rows), default=4)
+    fixed = 2 + sw + 1 + 9 + 1 + 4 + 1        # mark + status + sha + range + gaps
+    subj_w = max(12, width - fixed)
+    for r in rep.rows:
+        mark = c(_MARK.get(r.status, " "), r.status)
+        status = c(f"{r.status:<{sw}}", r.status)
+        sha = c(f"{rep.short(r.midpoint):<9}", "sha")
+        rng = c(f"{r.n_commits:>4}", "dim")
+        subj = rep.subject(r.midpoint)
+        if len(subj) > subj_w:
+            subj = subj[:subj_w - 1] + "…"
+        out.append(f"{mark} {status} {sha} {rng} {subj}")
+    return "\n".join(out) + "\n"
+
+
 # -------------------------------------------------------------------------- CLI
 def _default_logs_dir(repo: str) -> Optional[str]:
     """Best guess at the bisectlib per-commit log dir, if it exists."""
@@ -705,7 +752,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         prog="bisectlog",
         description="Render a git bisect session as Markdown or HTML.",
     )
-    p.add_argument("--format", choices=["md", "html"], default=None)
+    p.add_argument("--format", choices=["term", "md", "html"], default=None,
+                   help="output format (default: term when writing to a terminal)")
     p.add_argument("-o", "--output", help="write to FILE (extension implies format)")
     p.add_argument("--open", action="store_true", help="render HTML and open in browser")
     p.add_argument("--watch", nargs="?", const=2, type=int, metavar="SECS",
@@ -714,18 +762,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--log", help="render from a saved `git bisect log` dump")
     p.add_argument("--logs", help="per-commit sidecar/log dir (for recorded detail)")
     p.add_argument("--details", action="store_true", help="include per-commit detail")
-    p.add_argument("--no-color", action="store_true", help="plain Markdown (no emoji)")
+    p.add_argument("--no-color", action="store_true", help="disable ANSI colors / emoji")
     p.add_argument("--version", action="version", version=f"bisectlog {__version__}")
     args = p.parse_args(argv)
 
-    # resolve format
+    # resolve format: explicit > implied by -o extension > html for --open >
+    # term (bare invocation) unless stdout is redirected, then md
     fmt = args.format
     if fmt is None and args.output:
         fmt = "html" if args.output.endswith((".html", ".htm")) else "md"
     if args.open:
         fmt = "html"
     if fmt is None:
-        fmt = "md"
+        fmt = "term" if sys.stdout.isatty() else "md"
+
+    color = not args.no_color and sys.stdout.isatty() and "NO_COLOR" not in os.environ
 
     log_text = None
     if args.log:
@@ -743,6 +794,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             base = commit_url(rep.repo)
             return render_html(rep, details=args.details or True,
                                watch=args.watch, base_url=base)
+        if fmt == "term":
+            return render_terminal(rep, color=color)
         return render_markdown(rep, details=args.details, color=not args.no_color)
 
     def emit(text: str) -> None:

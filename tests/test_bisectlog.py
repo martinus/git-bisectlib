@@ -107,6 +107,48 @@ class TestBisectlog(unittest.TestCase):
         self.assertIsNotNone(rep)
         run(d, "git", "bisect", "reset")
 
+    def test_render_terminal(self):
+        d, shas = make_repo(n=12, bug_at=8)
+        script = Path(d, "t.sh")
+        script.write_text("#!/bin/sh\ngrep -q BUG code.txt && exit 1\nexit 0\n")
+        script.chmod(0o755)
+        run(d, "git", "bisect", "start", shas[-1], shas[0])
+        run(d, "git", "bisect", "run", "./t.sh")
+        rep = bisectlog.build_report(d)
+
+        # plain (no color): aligned rows, no markdown table pipes, has statuses
+        plain = bisectlog.render_terminal(rep, color=False, width=100)
+        self.assertNotIn("|", plain)
+        self.assertIn("first bad commit", plain)
+        self.assertTrue(any(w in plain for w in ("good", "bad")))
+        self.assertIn(rep.first_bad[:9], plain)
+        # colored output carries ANSI escapes
+        colored = bisectlog.render_terminal(rep, color=True, width=100)
+        self.assertIn("\033[", colored)
+        run(d, "git", "bisect", "reset")
+
+    def test_render_terminal_truncates_long_subject(self):
+        d = tempfile.mkdtemp(prefix="bisectlog-trunc-")
+        run(d, "git", "init", "-q")
+        run(d, "git", "config", "user.email", "t@t.t")
+        run(d, "git", "config", "user.name", "T")
+        longmsg = "this is an intentionally very long commit subject line to shorten"
+        shas = []
+        for i in range(1, 6):
+            Path(d, "code.txt").write_text("BUG\n" if i >= 4 else "ok\n")
+            Path(d, f"f{i}").write_text(str(i))
+            run(d, "git", "add", "-A")
+            run(d, "git", "commit", "-q", "-m", f"commit {i}: {longmsg}")
+            shas.append(run(d, "git", "rev-parse", "HEAD").stdout.strip())
+        run(d, "git", "bisect", "start", shas[-1], shas[0])
+        run(d, "git", "bisect", "run", "sh", "-c", "grep -q BUG code.txt && exit 1; exit 0")
+        rep = bisectlog.build_report(d)
+        narrow = bisectlog.render_terminal(rep, color=False, width=45)
+        rows = narrow.splitlines()[3:]  # skip header/blank
+        self.assertTrue(any("…" in ln for ln in rows))
+        self.assertTrue(all(len(ln) <= 45 for ln in rows))
+        run(d, "git", "bisect", "reset")
+
     def test_fmt_duration(self):
         self.assertEqual(bisectlog.fmt_duration(0), "0m")
         self.assertEqual(bisectlog.fmt_duration(90), "1m")

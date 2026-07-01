@@ -151,11 +151,25 @@ each commit's optional `eval.json` sidecar that `bisectlib` records). No reflog,
 no `/proc`, no heuristics.
 
 ```sh
-bisectlog                       # Markdown to stdout
+bisectlog                       # colored, aligned table in the terminal (default)
+bisectlog --format md           # Markdown
 bisectlog --format html -o report.html
 bisectlog --open                # render HTML and open in the browser
 bisectlog --watch               # re-render as the bisect progresses
-bisectlog --details             # include recorded commands/timings per commit
+bisectlog --details             # include recorded commands/timings per commit (md/html)
+```
+
+Run bare, it prints a compact terminal table — one line per evaluation, colored by
+status, subjects shortened to fit, with the first-bad commit called out:
+
+```
+bisect  good 2801e957  bad 79cb050c
+🎯 first bad commit  5c9dcafb  commit 8: tune the allocator
+
+✓ good 9a8b7c9    11 refactor the parser subsystem
+✗ bad  95345541     6 add a caching layer
+✗ bad  5c9dcafb     3 tune the allocator
+✓ good 19d89b12     2 optimize the hot loop
 ```
 
 ```

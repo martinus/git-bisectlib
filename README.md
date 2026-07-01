@@ -66,6 +66,11 @@ test("./bench", attempts=5, min_passes=1,           # …and the fastest of 5
 | `test(cmd, attempts=1, min_passes=None, passed=None, warmup=0, bad_when="fail")` | the verdict | **bad** |
 | `check(cmd) -> Result` | run once, **never exits** (introspection: `.ok`, `.out`, `.seconds`) | — |
 
+All three verbs accept **`cwd=`** to set the working directory for the command (relative
+paths resolve against the repo root, so `cwd="build"` means `<repo>/build`; absolute paths
+are honoured). Set a default for every command with `configure(cwd="build")`. Commands
+otherwise run at the repo root.
+
 **Flaky & benchmark tests.** `attempts` is the *max* tries, `min_passes` how many must
 pass (default: all); evaluation stops as soon as the verdict is decided. `passed` is a
 predicate over the `Result` (`.ok`, `.seconds`, …) deciding if one attempt passed —

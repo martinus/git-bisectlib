@@ -57,6 +57,7 @@ class _Config:
     logs: Optional[str] = None          # default: <cache>/bisectlib/<id>/
     clean: str = "reset"                # "reset" | "clean"
     color: Optional[bool] = None        # None=auto
+    cwd: Optional[str] = None           # default working dir for commands (repo root)
 
 
 _cfg = _Config()
@@ -66,7 +67,7 @@ _final: dict = {"outcome": "good", "code": GOOD}
 _finalized = False
 
 
-def configure(status_md=None, logs=None, clean=None, color=None) -> None:
+def configure(status_md=None, logs=None, clean=None, color=None, cwd=None) -> None:
     if status_md is not None:
         _cfg.status_md = status_md
     if logs is not None:
@@ -75,6 +76,23 @@ def configure(status_md=None, logs=None, clean=None, color=None) -> None:
         _cfg.clean = clean
     if color is not None:
         _cfg.color = color
+    if cwd is not None:
+        _cfg.cwd = cwd
+
+
+def _workdir(cwd: Optional[str]) -> str:
+    """Resolve the working directory for a command.
+
+    Precedence: per-call ``cwd`` > global ``configure(cwd=…)`` > repo root.
+    A relative path is resolved against the repo root, so ``cwd="build"`` means
+    ``<repo>/build`` regardless of where the recipe was launched from.
+    """
+    base = cwd if cwd is not None else _cfg.cwd
+    if base is None:
+        return _toplevel()
+    if os.path.isabs(base):
+        return base
+    return os.path.join(_toplevel(), base)
 
 
 # ------------------------------------------------------------------------- git
@@ -329,11 +347,12 @@ class Result:
         return self.code == 0
 
 
-def _exec(cmd: str, timeout: Optional[float], log_path: Optional[Path]) -> Result:
+def _exec(cmd: str, timeout: Optional[float], log_path: Optional[Path],
+          cwd: Optional[str] = None) -> Result:
     """Run a shell command, capturing combined output; kill the group on timeout."""
     start = time.monotonic()
     proc = subprocess.Popen(
-        cmd, shell=True, cwd=_toplevel(),
+        cmd, shell=True, cwd=_workdir(cwd),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         start_new_session=True,
     )
@@ -418,16 +437,20 @@ def _decide(outcome_code: int, reason: str = "") -> "NoReturn":  # type: ignore[
 
 # -------------------------------------------------------------------- run/test
 def run(cmd: str, *, skip_on_error: bool = False, timeout: Optional[float] = None,
-        on_timeout: str = "abort", name: Optional[str] = None) -> Result:
+        on_timeout: str = "abort", cwd: Optional[str] = None,
+        name: Optional[str] = None) -> Result:
     """Infrastructure step (configure/build/setup).
 
     Success -> continue. Failure -> ABORT by default (the harness is presumed
     broken; bisect state is preserved so you can fix the recipe and resume).
     Set skip_on_error=True to SKIP this commit instead.
+
+    ``cwd`` sets the working directory (relative to the repo root; absolute paths
+    honoured); defaults to the repo root or ``configure(cwd=…)``.
     """
     _announce()
     _echo_start("run", cmd)
-    res = _exec(cmd, timeout, _commit_log_dir() / f"{len(_steps)+1:02d}-run.log")
+    res = _exec(cmd, timeout, _commit_log_dir() / f"{len(_steps)+1:02d}-run.log", cwd)
     timed_out = res.code == -1
     ok = res.code == 0
     _record_step("run", cmd, res, ok)
@@ -450,7 +473,8 @@ def run(cmd: str, *, skip_on_error: bool = False, timeout: Optional[float] = Non
 def test(cmd: str, *, attempts: int = 1, min_passes: Optional[int] = None,
          passed: Optional[Callable[[Result], bool]] = None, warmup: int = 0,
          bad_when: str = "fail", timeout: Optional[float] = None,
-         on_timeout: str = "skip", name: Optional[str] = None) -> Optional[Result]:
+         on_timeout: str = "skip", cwd: Optional[str] = None,
+         name: Optional[str] = None) -> Optional[Result]:
     """A verdict step. Good -> continue; bad -> exit 1 (BAD).
 
     Like ``run``, a *passing* test continues to the next line, so you can have
@@ -490,7 +514,7 @@ def test(cmd: str, *, attempts: int = 1, min_passes: Optional[int] = None,
     last: Optional[Result] = None
     for i in range(warmup + attempts):
         res = _exec(cmd, timeout,
-                    _commit_log_dir() / f"{len(_steps)+1:02d}-test-{i+1}.log")
+                    _commit_log_dir() / f"{len(_steps)+1:02d}-test-{i+1}.log", cwd)
         last = res
         if res.code == -1:  # timeout
             _record_step("test", cmd, res, False,
@@ -528,11 +552,12 @@ def test(cmd: str, *, attempts: int = 1, min_passes: Optional[int] = None,
     return last  # good: continue to the next step (multiple tests AND together)
 
 
-def check(cmd: str, *, timeout: Optional[float] = None) -> Result:
+def check(cmd: str, *, timeout: Optional[float] = None,
+          cwd: Optional[str] = None) -> Result:
     """Run once and return the Result. NEVER exits the process."""
     _announce()
     _echo_start("check", cmd)
-    res = _exec(cmd, timeout, _commit_log_dir() / f"{len(_steps)+1:02d}-check.log")
+    res = _exec(cmd, timeout, _commit_log_dir() / f"{len(_steps)+1:02d}-check.log", cwd)
     _record_step("check", cmd, res, res.ok)
     _echo_result("check", cmd, res.ok, res.seconds, "ok" if res.ok else "fail")
     return res

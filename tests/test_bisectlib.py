@@ -268,6 +268,28 @@ class TestEngine(unittest.TestCase):
             d, "import bisectlib as b\nraise RuntimeError('boom')\n")
         self.assertEqual(code, 128)  # ABORT, never 'bad'
 
+    def test_cwd(self):
+        d = make_repo()
+        os.makedirs(os.path.join(d, "sub"), exist_ok=True)
+        # relative cwd resolves against the repo root
+        body = ("import bisectlib as b\n"
+                "r = b.check('basename $(pwd)', cwd='sub')\n"
+                "assert r.out.strip() == 'sub', r.out\n"
+                "b.test('test -d sub', cwd='sub')\n")  # runs inside sub, checks nested? no
+        # simpler: create a marker only reachable from sub via relative path
+        Path(d, "sub", "here").write_text("x")
+        body = ("import bisectlib as b\n"
+                "assert b.check('basename $(pwd)', cwd='sub').out.strip() == 'sub'\n"
+                "b.run('test -f here', cwd='sub')\n"   # relative to sub -> found
+                "b.test('test -f here', cwd='sub')\n")
+        code, _, _ = run_recipe(d, body)
+        self.assertEqual(code, 0)
+        # global default via configure(cwd=...)
+        body2 = ("import bisectlib as b\nb.configure(cwd='sub')\n"
+                 "b.test('test -f here')\n")  # no per-call cwd -> uses configured sub
+        code2, _, _ = run_recipe(d, body2)
+        self.assertEqual(code2, 0)
+
     def test_check_does_not_exit(self):
         d = make_repo()
         body = ("import bisectlib as b\n"

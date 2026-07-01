@@ -275,6 +275,29 @@ class TestEngine(unittest.TestCase):
         # and the old "bisectlog status:" announcement is gone
         self.assertNotIn("bisectlog status", stderr)
 
+    def test_once_runs_only_first_time(self):
+        d = make_repo()
+        # each invocation appends to a counter file; once() should run it just once
+        body = ("import bisectlib as b\n"
+                "b.once('echo x >> counter')\n"
+                "b.test('true')\n")
+        cache = tempfile.mkdtemp(prefix="bl-once-")
+        for _ in range(3):  # simulate three commit evaluations (same bisect id)
+            code, _, _ = run_recipe(d, body, cache=cache)
+            self.assertEqual(code, 0)
+        self.assertEqual(len(Path(d, "counter").read_text().split()), 1)  # ran once
+
+    def test_once_failure_aborts_and_retries(self):
+        d = make_repo()
+        cache = tempfile.mkdtemp(prefix="bl-once2-")
+        # failing once() aborts and does NOT record the marker
+        code, _, _ = run_recipe(d, "import bisectlib as b\nb.once('false')\n", cache=cache)
+        self.assertEqual(code, 128)  # ABORT
+        # ... so a later (fixed) run actually runs it
+        code2, _, _ = run_recipe(
+            d, "import bisectlib as b\nb.once('false', skip_on_error=True)\n", cache=cache)
+        self.assertEqual(code2, 125)  # SKIP (still fails, but marker still not set)
+
     def test_check_does_not_exit(self):
         d = make_repo()
         body = ("import bisectlib as b\n"

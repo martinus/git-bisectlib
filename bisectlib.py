@@ -23,6 +23,7 @@ Verbs:
     test(cmd, attempts=1, min_passes=None,…)  a verdict; pass->continue, fail->BAD.
                                               Use several; they AND together.
     check(cmd) -> Result                      runs once, NEVER exits (introspection)
+    once(cmd)                                 one-time setup, runs once per bisect
     good()/bad()/skip()/abort()               decide the commit directly from Python
                                               (e.g. after measuring with check())
     replace(path, old, new, ...)         sed-like edit, auto-reverted (clean tree)
@@ -31,6 +32,7 @@ Verbs:
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import re
@@ -48,7 +50,7 @@ from typing import Callable, Optional, Union
 __version__ = "0.1.0"
 
 __all__ = [
-    "run", "test", "check",                 # the verbs
+    "run", "test", "check", "once",         # the verbs
     "good", "bad", "skip", "abort",         # verdict primitives
     "replace", "fixup",                     # tree edits (auto-reverted)
     "in_range", "touches", "sha", "subject", "is_clean",  # git helpers
@@ -178,6 +180,7 @@ def _use_color() -> bool:
 
 
 _C = {"run": "\033[36m", "test": "\033[35m", "check": "\033[90m",
+      "once": "\033[34m", "cached": "\033[2m",
       "good": "\033[32m", "bad": "\033[31m", "skip": "\033[33m",
       "abort": "\033[91m", "dim": "\033[2m", "reset": "\033[0m"}
 
@@ -292,7 +295,6 @@ def _exec(cmd: str, timeout: Optional[float], log_path: Optional[Path],
 
 # --------------------------------------------------------------- log directory
 def _bisect_id() -> str:
-    import hashlib
     try:
         top = _toplevel()
     except RuntimeError:
@@ -495,6 +497,46 @@ def check(cmd: str, *, timeout: Optional[float] = None,
     _record_step("check", cmd, res, res.ok)
     _echo_result("check", cmd, res.ok, res.seconds, "ok" if res.ok else "fail")
     return res
+
+
+def once(cmd: str, *, key: Optional[str] = None, skip_on_error: bool = False,
+         timeout: Optional[float] = None, cwd: Optional[str] = None,
+         name: Optional[str] = None) -> Optional[Result]:
+    """Run a one-time setup command, at most **once per bisect session**.
+
+    For expensive, commit-independent setup (fetch a dependency, create a symlink)
+    that you'd otherwise repeat on every commit. The first time it's reached it
+    runs like ``run`` (aborts on error by default; ``skip_on_error=True`` to skip);
+    once it succeeds a marker keyed by the bisect id is recorded, and every later
+    commit skips it. Returns the Result, or None when skipped as already-done.
+
+    The setup's artifacts must survive ``git checkout`` between commits — i.e. be
+    untracked or outside the work tree (build outputs, symlinks in ignored dirs).
+    Distinguish it from a `run` build step: `once` is for what's the same on every
+    commit; `run` is for what must be rebuilt per commit. Pass an explicit ``key``
+    to dedupe by something other than the exact command text.
+    """
+    marker = _logs_dir() / "once" / hashlib.sha1((key or cmd).encode()).hexdigest()[:16]
+    if marker.exists():
+        _echo_result("once", cmd, True, 0.0, "cached")
+        return None
+    _echo_start("once", cmd)
+    res = _exec(cmd, timeout, _commit_log_dir() / f"{len(_steps)+1:02d}-once.log", cwd)
+    _record_step("once", cmd, res, res.code == 0)
+    if res.code == 0:
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(cmd)
+        except OSError:
+            pass
+        _echo_result("once", cmd, True, res.seconds, "ok")
+        return res
+    # failure (marker not written, so it retries next run after you fix things)
+    if res.code == -1 or not skip_on_error:      # timeout or hard error -> abort
+        _echo_result("once", cmd, False, res.seconds, "abort")
+        _decide(ABORT)
+    _echo_result("once", cmd, False, res.seconds, "skip")
+    _decide(SKIP)
 
 
 def _record_step(verb, cmd, res: Optional[Result], ok, extra=None, outcome=None):

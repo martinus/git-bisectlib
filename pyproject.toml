@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bisectlog"
+name = "bisectlib"
 version = "0.1.0"
 description = "Automated git bisect: render bisect sessions (bisectlog) and write bisect recipes (bisectlib)."
 readme = "README.md"
@@ -19,11 +19,15 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/martinus/bisectlog"
+Homepage = "https://github.com/martinus/bisectlib"
 
 [project.scripts]
 bisectlog = "bisectlog:main"
 git-bisectlog = "bisectlog:main"
 
 [tool.setuptools]
-py-modules = ["bisectlog", "bisectlib"]
+packages = ["bisectlog", "bisectlib"]
+
+[tool.setuptools.package-data]
+bisectlog = ["py.typed"]
+bisectlib = ["py.typed"]

@@ -214,24 +214,27 @@ to import that module — there are two easy ways:
 
 **1. Install it (recommended for repeated use).**
 ```sh
-pip install -e /path/to/bisectlog   # or: pip install bisectlog
+pip install -e /path/to/bisectlib   # or: pip install bisectlib
 ```
 Now `import bisectlib` works from any repo, and you also get the `bisectlog` /
 `git-bisectlog` commands. Just write `recipe.py` and run
-`git bisect run python recipe.py`.
+`git bisect run python recipe.py`. The installed packages ship a `py.typed`
+marker, so editors/type-checkers resolve `run`, `test`, … without warnings.
+(For an *editable* dev install, add `--config-settings editable_mode=compat` so
+mypy can follow it: `pip install -e . --config-settings editable_mode=compat`.)
 
-**2. Zero-install: drop `bisectlib.py` next to your recipe.**
+**2. Zero-install: drop the `bisectlib/` package next to your recipe.**
 When you run `python recipe.py`, Python puts the recipe's own directory on
-`sys.path`, so a `bisectlib.py` sitting beside `recipe.py` is imported
-automatically — no install, no `PYTHONPATH`. Copy `bisectlib.py` (and
-`bisectlog.py` if you want the auto-rendered status report) next to the recipe.
+`sys.path`, so a `bisectlib/` folder sitting beside `recipe.py` is imported
+automatically — no install, no `PYTHONPATH`. Copy the `bisectlib/` directory
+(and `bisectlog/` if you want the auto-rendered status report) next to the recipe.
 
 > Keep those copies **untracked** in the repo you're bisecting. Untracked files
 > survive `git checkout`, so they persist across every commit of the bisect — but
 > if you *commit* them they'd vanish on older commits (which don't have them) and
 > the import would fail mid-bisect. Untracked = present everywhere, part of nothing.
 
-(A bare `import bisectlib` without either of the above fails because the module
+(A bare `import bisectlib` without either of the above fails because the package
 isn't on `sys.path` — that's why the tests inject it explicitly.)
 
 Requires Python 3.10+. No third-party dependencies.

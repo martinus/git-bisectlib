@@ -6,5 +6,4 @@ dist/
 .eggs/
 .venv/
 .pytest_cache/
-*.html
-!report.html
+.bisect/

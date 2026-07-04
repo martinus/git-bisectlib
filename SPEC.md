@@ -1,17 +1,13 @@
-# `bisectlib` + `bisectlog` — a Python toolkit for automated `git bisect`
+# `bisectlib` — a Python toolkit for automated `git bisect`
 
-> **Status:** **finalized** — ready to implement. This document is the hand-off for a
-> fresh session to build from.
+> **Status:** **finalized.** One package: **`bisectlib`** — the recipe engine
+> (`run`/`test`/`check`/`fixup`/`replace`) plus a built-in report renderer
+> (`bisectlib._report`) that writes a live Markdown status page as the bisect runs.
 >
-> **Two deliverables:** **`bisectlib`** — the recipe engine (`run`/`test`/`check`/`fixup`/
-> `replace`); and **`bisectlog`** — the standalone, read-only status renderer (Markdown/
-> HTML). They share only the `git bisect log` parsing core (`bisectlib` imports `bisectlog`
-> as the canonical renderer).
->
-> **Renderer contract (load-bearing):** `bisectlog` derives its entire report from
-> only (1) `git bisect log` and (2) per-commit information (git metadata + each commit's
-> optional `eval.json` sidecar of recorded facts). **No reflog, no `/proc`, no PID, no
-> heuristic inference** anywhere — if a fact wasn't logged or recorded, it isn't shown.
+> **Renderer contract (load-bearing):** the report derives from only (1) `git bisect log`
+> and (2) per-commit information (git metadata + each commit's optional `eval.json` sidecar
+> of recorded facts). **No reflog, no `/proc`, no PID, no heuristic inference** anywhere —
+> if a fact wasn't logged or recorded, it isn't shown.
 
 ## 1. Goal
 
@@ -126,7 +122,7 @@ includes the short sha + verb so interleaved output stays readable. The command'
 stdout+stderr is **streamed live to stderr as it runs** (so you watch the build/test; git
 bisect run forwards it to your terminal) while also being captured to the per-commit log
 dir. Each step is appended to that commit's `eval.json` sidecar (cmd, exit code, duration,
-flaky/benchmark stats, fixups) — the recorded facts `bisectlog` reads for its detail view (§6).
+flaky/benchmark stats, fixups) — the recorded facts the report reads for its detail view (§6).
 
 ### 4.1 `run` — infrastructure steps (abort on error by default)
 
@@ -288,11 +284,12 @@ truthy for direct `if` use.
 ### 4.7 `configure` — optional, zero-config defaults otherwise
 
 ```python
-configure(status_md=None,   # default: ${XDG_CACHE_HOME:-~/.cache}/bisectlib/<session>/status.md
-                            # (temp/cache dir — repo untouched). Set a path to override.
-          logs=None,        # default: the same <session>/ dir, per-commit logs in <session>/<sha>/
-          clean="reset",    # "reset" (keep build/) | "clean" (git clean -fdx)
-          color=None)       # None=auto (tty & !NO_COLOR) | True | False
+configure(status_md=None,   # default: <repo>/.bisect/status.md (fixed, watchable path)
+                            # Set a path to override.
+          logs=None,        # default: <repo>/.bisect/ ; per-commit logs in .bisect/<sha>/
+          clean="reset",    # "reset" (keep build/) | "clean" (git clean -fdx, keeps .bisect/)
+          color=None,       # None=auto (tty & !NO_COLOR) | True | False
+          cwd=None)         # default working dir for commands (relative to repo root)
 ```
 
 ### 4.8 verdict primitives — decide directly from Python
@@ -377,10 +374,11 @@ Because every column derives from `git bisect log`, resume "just works": after a
 the log is intact, so the next render reproduces the full table — no continuity key, no
 merge logic, no write races.
 
-> **Finalization caveat.** `git bisect run` records a commit's verdict *after* the recipe
-> process exits, so in pure `git bisect run python recipe.py` mode the **last** evaluated
-> commit shows as `🕒 todo` until something re-renders. Run `bisectlog` (or
-> `python -m bisectlog`) once when the bisect finishes for a complete report.
+> **Finalization.** `git bisect run` records a commit's verdict *after* the recipe process
+> exits, and stops after the final commit — so nothing would re-render the **last**
+> evaluation, leaving it stuck on `🕒 todo`. The engine handles this at exit: its finalize
+> render feeds the reconstruction a log with its own just-decided mark appended, so the
+> saved `status.md` names the first-bad commit without any extra command.
 
 > **What's *not* in the log:** per-eval wall-clock timing, flaky ratios ("2/5 pass"), and
 > which fixup/replace applied. The 5-column table doesn't need them (they live in the
@@ -437,29 +435,28 @@ the whole session, so both stay stable across abort→resume.
 
 ### File location & name
 
-Since the report is a stateless render, the filename only needs to **locate** the file —
-there's no continuity to preserve.
+Since the report is a stateless render, the location only needs to **locate** the file at a
+predictable path you can keep open — there's no continuity to preserve.
 
-- **Stored in a temp/cache dir so the repo is never modified:** one directory per
-  session, `${XDG_CACHE_HOME:-~/.cache}/bisectlib/<session>/`, holding `status.md` and the
-  per-commit logs under `<session>/<sha>/`. `configure(status_md=…)` overrides (e.g. to drop
-  it into the repo).
+- **A single `.bisect/` directory at the repo root**, holding `status.md` at a fixed path
+  and the per-commit logs under `.bisect/<sha>/`. The point is watchability: `.bisect/status.md`
+  is always the same path, so you open it once in your editor and it refreshes in place —
+  no per-run subdir to chase. `configure(status_md=…, logs=…)` overrides.
+- **`.bisect/` is registered in the repo's local excludes** (`.git/info/exclude`, appended
+  once — never the project's tracked `.gitignore`). That keeps it out of `git status` (so it
+  isn't committed by accident and doesn't trip the recipe's own `is_clean()` checks) while
+  `git checkout` between commits leaves the untracked directory untouched. When
+  `clean="clean"`, the `git clean -fdx` excludes `.bisect/` so the report survives.
 - **`status.md` is re-rendered after every step** (not just at the end), and the current
   commit's `eval.json` is flushed alongside it, so the file is a live view of the in-flight
-  commit's progress — `bisectlog --watch` it or tail it while a long build/test runs.
-- **`<session>` = `<YYYY-MM-DD>_<HH-MM>__<good>-<bad>__<bisect-id>`** — a session-start
-  date/time and the short `good-bad` range for at-a-glance identification, suffixed with the
-  stable short `<bisect-id>` (double underscores separate the three groups). Kept lean (7-char
-  shas, minute-precision time, 8-char id), e.g. `2026-07-02_08-30__ac65905-720acb6__49fd6cd5`.
-  The first process to evaluate a commit creates the directory; later commits reuse it (matched
-  on the id suffix) so the name stays fixed for the whole session — the timestamp records when
-  it began.
-- **`<bisect-id>` = short hash of `worktree_path + original anchors`** (anchors from
-  `original_anchors()`, i.e. from `git bisect log`). Worktree path keeps parallel
-  git-worktrees apart; the anchor component keeps successive bisects in the same worktree in
-  separate files (a nice history), rather than overwriting. Resume reuses the same name
-  automatically because the anchors are unchanged — but even if it didn't, the render is
-  rebuilt from the log, so nothing is lost either way.
+  commit's progress — open it in your editor and watch a long build/test as it runs.
+- **Single session per repo.** git allows only one bisect per worktree, so a flat `.bisect/`
+  matches git's own model (its `BISECT_*` state is likewise one-per-worktree). An `id` file
+  holds the **`<bisect-id>`** (short hash of `worktree_path + original anchors`, from
+  `original_anchors()` / `git bisect log`). Every process of one bisect sees the same id and
+  shares the directory; starting a *different* bisect (new anchors) changes the id, so the
+  first process of the new run clears the previous report, logs and `once()` markers, while a
+  resume (same anchors) keeps them so `once()` setup stays done.
 - No PID, reflog, `/proc`, or other brittle/process-specific signal is used anywhere — the
   identity and the whole report derive only from `git bisect log` + commit metadata.
 
@@ -512,54 +509,29 @@ recipe locks in a verdict its sidecar records it (`pending: false`) so the saved
 - When the range's commit count reaches 1, the `bad` commit is the **first bad commit**
   (the answer); the report should flag that explicitly.
 
-### Standalone CLI: `bisectlog`
+### The report renderer (`bisectlib._report`)
 
-Because the report derives purely from `git bisect log` + git, the renderer is shipped as
-a **separate, self-contained CLI** that works on *any* bisect — including ones run by hand
-with no `bisectlib` recipe. It's the canonical renderer; `bisectlib` just calls it (so there
-is one implementation, not two).
+Because the report derives purely from `git bisect log` + git, the renderer is a
+**self-contained, read-only** module (`bisectlib._report`). It works on *any* bisect —
+including ones run by hand with no `bisectlib` recipe — and the engine calls it after every
+step to (re)write `status.md`. Importable as
+`from bisectlib._report import build_report, render_markdown`.
 
-- **Single file, stdlib only** (`#!/usr/bin/env python3`, no pip deps), so it can be
-  dropped onto any machine. Invoked directly as **`bisectlog`**, and — if installed as
-  `git-bisectlog` on `PATH` — also as **`git bisectlog`** (git treats any `git-*` on `PATH`
-  as a subcommand). Also importable:
-  `from bisectlog import parse_bisect_log, render_markdown, render_html`.
+- `build_report(repo, log_text=None, logs_dir=None) -> Report | None` runs the
+  reconstruction walk (anchors → rows → bounds), synthesizes the in-flight `todo` row from
+  `HEAD`, and queries git for dates/counts. Returns `None` when no bisect is in progress.
+- `render_markdown(report, details=False)` emits the 5-column table; with `details=True` it
+  adds the per-commit detail sections. When the range narrows to 1, it renders a prominent
+  **"First bad commit"** block with the full commit header, message and diffstat
+  (`git show --stat`), the way `git bisect` reports it. Terminal states are surfaced too
+  ("only skipped commits left — cannot conclude").
 
-```
-bisectlog [--format md|html] [-o FILE] [--open] [--watch[=SECS]]
-          [-C DIR] [--log FILE] [--no-color]
-```
+The reconstruction walk is stdlib-only and never touches the repo, so it's the load-bearing
+core the rest of the design relies on.
 
-| Flag | Effect |
-|---|---|
-| *(none)* | Markdown to stdout |
-| `--format html` | Self-contained HTML (inline CSS/JS, no external assets — emailable) |
-| `-o FILE` | Write to file instead of stdout (extension can imply format) |
-| `--open` | Render HTML to a temp file and open it in the browser |
-| `--watch[=SECS]` | Re-render on `BISECT_LOG` change (poll, default 2s); HTML embeds a `<meta refresh>` so the browser auto-updates during a long bisect |
-| `-C DIR` | Operate on another repo/worktree |
-| `--log FILE` | Render from a saved `git bisect log` dump (offline / for sharing a result) |
-| `--no-color` | Plain Markdown (no status emoji/ANSI) |
+#### Data sources — the renderer's hard contract
 
-Behavior:
-- Exits cleanly with a friendly message if no bisect is in progress (detect via
-  `git bisect log` returning empty/error).
-- Same reconstruction walk as above; **MD** = the 5-column table; **HTML** adds polish:
-  status **badges** (green/red/amber), a **progress bar** (`commits remaining` → `evals
-  left`), a copy-button on the `resume:` command, and **commit links** to the forge —
-  detect `git remote get-url origin`, normalize `git@…`→`https://…`, map to
-  `/commit/<sha>` for GitHub/GitLab/Bitbucket.
-- When the range narrows to 1, render a prominent **"First bad commit"** card with full
-  author/date/subject/body (`git show -s`). Surface terminal states too ("only skipped
-  commits left — cannot conclude").
-
-This is independently shippable and a sensible **first thing to build** — it's pure read
-only (never touches the repo), exercises the `git bisect log` parsing the rest of the
-design depends on, and is immediately useful on existing bisects.
-
-#### Data sources — the tool's hard contract
-
-`bisectlog` reads **only two things**, both keyed by commit. Nothing is inferred;
+The renderer reads **only two things**, both keyed by commit. Nothing is inferred;
 there is **no brittle heuristic logic**:
 
 1. **`git bisect log`** — the structure: which commits were evaluated, in what order, with
@@ -579,11 +551,10 @@ about a commit — never approximated.
 
 The richer detail (commands, per-step exit codes, exact timings, flaky ratio, benchmark
 timing, fixups) comes **solely from each commit's `eval.json` sidecar**, which the engine
-writes into the per-commit log dir (`<cache>/bisectlib/<session>/<sha>/`) next to the
-captured `*.log` files (named `NN-<verb>-<slug-of-command>.log`, e.g.
-`01-run-cmake-b-build.log`; a `test` records the last attempt's file,
-`NN-test-<slug>-<attempt>.log`). Each step's `log` is a real filename, so the
-report's **step** cell links to it (`<sha>/<log>`, relative to `status.md`):
+writes into the per-commit log dir (`.bisect/<sha>/`) next to the captured `*.log` files
+(named `NN-<verb>-<slug-of-command>.log`, e.g. `01-run-cmake-b-build.log`; a `test` records
+the last attempt's file, `NN-test-<slug>-<attempt>.log`). Each step's `log` is a real
+filename, so the report's **step** cell links to it (`<sha>/<log>`, relative to `status.md`):
 
 ```json
 {
@@ -602,19 +573,11 @@ Keyed by sha, so partial coverage is fine — a row with no sidecar (e.g. a hand
 or evals that predate the engine) shows only the log+metadata view, with no fabricated
 numbers. Timings are always the engine's **measured** durations, never inferred.
 
-**Presentation when a sidecar is present:**
-- **Markdown** (`--details`): the 5-column table stays compact, with the `status` cell
-  gaining inline recorded detail — `✅ good · 2/5 · 1.8s`. Below the table, a per-commit
-  **details section**: command list with exit codes & durations, the flaky breakdown,
-  fixups applied, and links to each `*.log`.
-- **HTML**: each row is **expandable** (`<details>`) to reveal a steps sub-table
-  (`cmd · exit · time · log`), a flaky pass/fail dot strip (`● ● ○ ● ●` → 2/5), a
-  the per-attempt timings (fastest highlighted), applied fixups, and total eval duration; plus a
-  **summary** (total measured wall-clock, slowest step, eval count). Full captured output
-  is linked (or inlined for `--open`).
-
-Flags: `--details` (include the detail sections / expanders; HTML on by default),
-`--logs DIR` (sidecar/log dir if not the default location).
+**Presentation when a sidecar is present:** the 5-column table stays compact, with the
+`status` cell gaining inline recorded detail — `🟢 good · 2/5 · 1.8s`, or `⏳ running \`…\``
+while a step is still executing. Below the table (with `details=True`), a per-commit
+**details section** lists each step's command, exit code and duration, notes the fixups
+applied, and links each step to its captured `*.log`.
 
 > Engine side: writing `eval.json` + per-step `*.log` is part of `run`/`test`/`check`
 > (§4) and the per-commit log dir (§6). The renderer never *requires* it — when absent the
@@ -671,14 +634,12 @@ test("./run_tests")
 3. **git helpers:** `sha`/`subject`/`is_clean`/`in_range`/`touches` (shell out to git).
 4. **`replace`** with str/`re.Pattern` type dispatch + `if_missing`.
 5. **`fixup`** (`patch=` / `cherry_pick=`) + `apply_fixups`.
-6. **`bisectlog` (standalone renderer)** — *stateless, stdlib-only, read-only*.
+6. **`bisectlib._report` (built-in renderer)** — *stateless, stdlib-only, read-only*.
    Parse `git bisect log`, run the reconstruction walk (anchors → rows → bounds),
-   synthesize the in-flight `todo` row from `HEAD`, query git for dates/counts, emit
-   Markdown or self-contained HTML (`--format`, `-o`, `--open`, `--watch`, `-C`, `--log`).
-   The library imports it as the canonical renderer and calls it at the top of each
-   evaluation; per-commit log dirs hold full command output (+ optional sidecar for
-   timing/flaky detail). **Good candidate to build first** — independently useful and it
-   nails down the `git bisect log` parsing everything else relies on.
+   synthesize the in-flight `todo` row from `HEAD`, query git for dates/counts, emit the
+   Markdown `status.md`. The engine calls it after every step; per-commit log dirs hold full
+   command output (+ optional sidecar for timing/flaky detail). **Good candidate to build
+   first** — it nails down the `git bisect log` parsing everything else relies on.
 7. **Console echo** in color to stderr (auto tty/`NO_COLOR` detection).
 8. **Dry-run mode:** outside a live bisect (no `refs/bisect/*`), `python recipe.py` still
    runs the steps against HEAD and prints the verdict, gracefully skipping the range
@@ -688,11 +649,9 @@ test("./run_tests")
    commits.
 
 ### Packaging
-- Standalone repo / pip package (no dependency on the keto-calculator repos — unrelated).
-- Two packages: **`bisectlog`** (the renderer — **stdlib only**, also the
-  `bisectlog` / `git bisectlog` CLI) and **`bisectlib`** (the recipe engine, imports
-  `bisectlog`). Each ships a `py.typed` marker so installed usage is fully typed.
-  Splitting further can wait.
+- Standalone repo / pip package, **stdlib only** — no runtime dependencies.
+- One package: **`bisectlib`** (the recipe engine) with a built-in `bisectlib._report`
+  renderer module. Ships a `py.typed` marker so installed usage is fully typed.
 - Python 3.10+ (uses `re.Pattern`, `match`/`Enum`, etc.).
 
 ---

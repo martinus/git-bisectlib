@@ -16,9 +16,9 @@ hand-rolled bisect scripts painful:
 - **Per-range build fixes.** `fixup(patch=…)` / `replace(...)` apply a patch or a
   sed-like edit for the commits that need it, then **auto-revert** so the tree
   stays clean for the next checkout.
-- **A clear report.** Every run records what happened; the companion
-  [`bisectlog`](#bisectlog-the-report-renderer) tool renders the whole session as
-  Markdown or HTML.
+- **A live report.** Every run records what happened into
+  [`.bisect/status.md`](#the-live-status-report-bisectstatusmd) — a Markdown page
+  in your repo that updates as the bisect runs, watchable right in your editor.
 
 It is **pure standard library** — no dependencies, just `git` on your `PATH`.
 
@@ -30,10 +30,9 @@ See [`SPEC.md`](SPEC.md) for the full design rationale.
 pip install git+https://github.com/martinus/bisectlib
 ```
 
-That single command gives you `import bisectlib` for recipes plus the
-`bisectlog` / `git-bisectlog` report CLIs. It's pure standard library — no
-runtime dependencies — and ships type information (`py.typed`), so editors and
-type-checkers resolve `run`, `test`, … without warnings. See
+That single command gives you `import bisectlib` for recipes. It's pure standard
+library — no runtime dependencies — and ships type information (`py.typed`), so
+editors and type-checkers resolve `run`, `test`, … without warnings. See
 [Install / how a recipe finds `bisectlib`](#install--how-a-recipe-finds-bisectlib)
 for a zero-install alternative.
 
@@ -183,37 +182,17 @@ git bisect run python recipe.py # continue — git routes around it
 `skip_on_error=True` on that `run()` step — best for a whole known-bad band,
 whereas `git bisect skip` is best for a one-off.)
 
-## bisectlog (the report renderer)
+## The live status report (`.bisect/status.md`)
 
-`bisectlog` is a standalone, **read-only** CLI that renders any `git bisect`
-session (recipe-driven or hand-run) as Markdown or HTML. It derives the entire
-report from only `git bisect log` + per-commit information (git metadata, plus
-each commit's optional `eval.json` sidecar that `bisectlib` records). No reflog,
-no `/proc`, no heuristics.
+As a recipe runs, `bisectlib` writes a Markdown report to **`.bisect/status.md`**
+at the root of the repo you're bisecting. Open it in your editor and leave it
+open — it's a fixed path that updates in place as the bisect progresses, so you
+can watch the range funnel down and see what's running right now without
+touching another terminal.
 
-```sh
-bisectlog                       # colored, aligned table in the terminal (default)
-bisectlog --format md           # Markdown
-bisectlog --format html -o report.html
-bisectlog --open                # render HTML and open in the browser
-bisectlog --watch               # re-render as the bisect progresses
-bisectlog --details             # include recorded commands/timings per commit (md/html)
-```
-
-Run bare, it prints a compact terminal table — one line per evaluation (input range
-`good`/`bad` → `midpoint` → status), colored by status, `cmts` = commits still in the
-range, subjects shortened to fit, with the first-bad commit called out:
-
-```
-bisect  good 2801e957a  bad 79cb050c2
-🎯 first bad commit  5c9dcafb3  commit 8: tune the allocator
-
-       good      bad       midpoint   cmts  subject
-✓ good 2801e957a 79cb050c2 9a8b7c9d1    11  refactor the parser subsystem
-✗ bad  9a8b7c9d1 79cb050c2 95345541b     6  add a caching layer
-✗ bad  9a8b7c9d1 95345541b 5c9dcafb3     3  tune the allocator
-✓ good 9a8b7c9d1 5c9dcafb3 19d89b121     2  optimize the hot loop
-```
+The report is derived from only `git bisect log` + per-commit information (git
+metadata, plus each commit's `eval.json` sidecar that the recipe records). No
+reflog, no `/proc`, no heuristics — if a fact wasn't recorded, it isn't shown.
 
 ```
 # Bisect report
@@ -242,21 +221,38 @@ Date:   2026-06-15 11:40:00 +0200
 
 When the bisect finishes, the report shows the culprit **the way `git bisect`
 does** — the full commit header, message, and diffstat — so you can read the
-verdict without another `git show`.
+verdict without another `git show`. Each row reads in causal order: the **input
+range** (`good`/`bad`) → the **midpoint** git chose → the **status**.
 
 `status.md` is (re)written the moment each command **starts**, not just when it
 finishes, so the report always names what is running right now — the in-flight
 commit shows a `⏳ running` step and the top-level row reads `⏳ running \`…\``.
-Each step links to its captured log, and that log is streamed to disk line by
-line as the command runs, so you can click it (HTML) or tail it and **watch the
-build/test as it happens** instead of waiting for it to complete.
+Each step links to its captured per-commit log under `.bisect/<sha>/`, and that
+log is streamed to disk line by line as the command runs, so you can open it and
+**watch the build/test as it happens** instead of waiting for it to complete.
 
 Each `good`/`bad`/`midpoint` cell is the commit hash plus its **commit date and
 author** (the subject is omitted to keep rows compact); the **range** column is the
 `good..bad` span (duration · commit count).
 
-Each row reads in causal order: the **input range** (`good`/`bad`) → the
-**midpoint** git chose → the **status**. Watch the range funnel down.
+### The `.bisect/` directory
+
+Everything the report needs lives in one directory at the repo root:
+
+```
+<repo>/.bisect/
+  status.md            # the report — pin this tab in your editor
+  <sha>/eval.json      # per-commit recorded facts (steps, timings, verdict)
+  <sha>/NN-run-*.log   # captured, live-streamed command output
+  id                   # bisect identity; a new bisect wipes stale artifacts
+```
+
+It's registered in the repo's **local** excludes (`.git/info/exclude`, never your
+tracked `.gitignore`), so it stays out of `git status`, never gets committed, and
+survives the `git checkout` git does between commits. Starting a *different*
+bisect (new good/bad anchors) clears the previous run's report and logs; resuming
+the same one keeps them (so `once()` setup stays done). Point it elsewhere with
+`configure(logs="…", status_md="…")` if you prefer.
 
 ## Install / how a recipe finds `bisectlib`
 
@@ -267,9 +263,8 @@ to import that module — there are two easy ways:
 ```sh
 pip install -e /path/to/bisectlib   # or: pip install bisectlib
 ```
-Now `import bisectlib` works from any repo, and you also get the `bisectlog` /
-`git-bisectlog` commands. Just write `recipe.py` and run
-`git bisect run python recipe.py`. The installed packages ship a `py.typed`
+Now `import bisectlib` works from any repo. Just write `recipe.py` and run
+`git bisect run python recipe.py`. The installed package ships a `py.typed`
 marker, so editors/type-checkers resolve `run`, `test`, … without warnings.
 (For an *editable* dev install, add `--config-settings editable_mode=compat` so
 mypy can follow it: `pip install -e . --config-settings editable_mode=compat`.)
@@ -277,8 +272,8 @@ mypy can follow it: `pip install -e . --config-settings editable_mode=compat`.)
 **2. Zero-install: drop the `bisectlib/` package next to your recipe.**
 When you run `python recipe.py`, Python puts the recipe's own directory on
 `sys.path`, so a `bisectlib/` folder sitting beside `recipe.py` is imported
-automatically — no install, no `PYTHONPATH`. Copy the `bisectlib/` directory
-(and `bisectlog/` if you want the auto-rendered status report) next to the recipe.
+automatically — no install, no `PYTHONPATH`. Copy the `bisectlib/` directory next
+to the recipe; the `.bisect/status.md` report is built in, nothing else to copy.
 
 > Keep those copies **untracked** in the repo you're bisecting. Untracked files
 > survive `git checkout`, so they persist across every commit of the bisect — but

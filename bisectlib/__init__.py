@@ -37,6 +37,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -47,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Union
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = [
     "run", "test", "check",                 # the verbs
@@ -67,8 +68,8 @@ _OUTCOME_NAME = {GOOD: "good", BAD: "bad", SKIP: "skip", ABORT: "abort"}
 # ----------------------------------------------------------------- configuration
 @dataclass
 class _Config:
-    status_md: Optional[str] = None     # default: <cache>/bisectlib/<session>/status.md
-    logs: Optional[str] = None          # default: <cache>/bisectlib/<session>/
+    status_md: Optional[str] = None     # default: <repo>/.bisect/status.md
+    logs: Optional[str] = None          # default: <repo>/.bisect/
     clean: str = "reset"                # "reset" | "clean"
     color: Optional[bool] = None        # None=auto
     cwd: Optional[str] = None           # default working dir for commands (repo root)
@@ -346,49 +347,94 @@ def _bisect_id() -> str:
     return hashlib.sha1((top + "\n" + anchors).encode()).hexdigest()[:12]
 
 
-def _cache_base() -> Path:
-    cache = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return Path(cache) / "bisectlib"
+# The report and per-commit logs live in a single `.bisect/` directory at the
+# repo root — right beside the code being bisected, so `status.md` opens in the
+# editor at a fixed, watchable path (``.bisect/status.md``) instead of a
+# per-run subdir buried under ~/.cache. `.bisect/` is registered in the repo's
+# local excludes (see `_register_exclude`), so it never shows up in `git status`
+# or gets committed, and `git checkout` between commits leaves it untouched.
+_DIRNAME = ".bisect"
+_session_ready = False
 
 
-_resolved_logs_dir: Optional[Path] = None
+def _bisect_root() -> Path:
+    if _cfg.logs:
+        return Path(_cfg.logs)
+    try:
+        top = _toplevel()
+    except RuntimeError:
+        top = os.getcwd()
+    return Path(top) / _DIRNAME
 
 
-_ID_LEN = 8  # short-id length used in the session dir name (and glob key)
+def _register_exclude() -> None:
+    """Add `.bisect/` to the repo's local excludes (`.git/info/exclude`).
 
-
-def _session_dirname() -> str:
-    """A human-readable, stable directory name for this bisect session.
-
-    ``<YYYY-MM-DD>_<HH-MM>__<good>-<bad>__<id>`` — a date/time to tell sessions
-    apart and spot the latest at a glance, the short ``good-bad`` range so you
-    can see what was bisected, and a short id as a collision-proof suffix (the id
-    is what we glob on to keep the name fixed for the whole session). Double
-    underscores separate the three groups; kept lean with 7-char shas,
-    minute-precision time, and an 8-char id, e.g.
-    ``2026-07-02_08-30__ac65905-720acb6__49fd6cd5``.
+    Local and untracked — it does not touch the project's own tracked
+    `.gitignore`. This keeps our working-tree directory out of `git status`, so
+    it never gets committed by accident and doesn't make the recipe's own
+    `is_clean()` checks trip over an untracked dir.
     """
-    _, bad0, good0 = _bisect_anchors()
-    bid = _bisect_id()[:_ID_LEN]
-    stamp = time.strftime("%Y-%m-%d_%H-%M")
-    if good0 and bad0:
-        return f"{stamp}__{good0[:7]}-{bad0[:7]}__{bid}"
-    return f"{stamp}__{bid}"
+    if _cfg.logs:  # user pointed logs elsewhere; nothing to exclude
+        return
+    try:
+        git_dir = _git("rev-parse", "--git-dir", check=False)
+        if not git_dir:
+            return
+        info = Path(git_dir) / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        exclude = info / "exclude"
+        entry = f"/{_DIRNAME}/"
+        existing = exclude.read_text() if exclude.exists() else ""
+        if entry not in existing.split():
+            sep = "" if not existing or existing.endswith("\n") else "\n"
+            with open(exclude, "a") as fh:
+                fh.write(f"{sep}{entry}\n")
+    except OSError:
+        pass
+
+
+def _ensure_session() -> None:
+    """Prepare `.bisect/` once per process; clear it when a new bisect starts.
+
+    The directory is reused for every commit of one bisect (its `id` file holds
+    the bisect id — repo + original good/bad anchors). When those anchors change
+    a *different* bisect is under way, so we wipe the stale report, logs and
+    `once()` markers left by the previous one; the same anchors (a resume, or the
+    next commit of the same run) keep everything, so `once()` setup stays done.
+    """
+    global _session_ready
+    if _session_ready:
+        return
+    _session_ready = True
+    _register_exclude()
+    if _cfg.logs:
+        return
+    root = _bisect_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        idfile = root / "id"
+        cur = _bisect_id()
+        prev = idfile.read_text().strip() if idfile.exists() else None
+        if prev != cur:
+            for child in root.iterdir():
+                if child.name == "id":
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    try:
+                        child.unlink()
+                    except OSError:
+                        pass
+            idfile.write_text(cur)
+    except OSError:
+        pass
 
 
 def _logs_dir() -> Path:
-    global _resolved_logs_dir
-    if _cfg.logs:
-        return Path(_cfg.logs)
-    if _resolved_logs_dir is not None:
-        return _resolved_logs_dir
-    base = _cache_base()
-    bid = _bisect_id()[:_ID_LEN]
-    # Reuse an existing session dir for this id so the name (and its timestamp)
-    # stays fixed across every commit evaluated; only the first process creates it.
-    existing = sorted(base.glob(f"*__{bid}"))
-    _resolved_logs_dir = existing[0] if existing else base / _session_dirname()
-    return _resolved_logs_dir
+    _ensure_session()
+    return _bisect_root()
 
 
 def _status_md_path() -> Path:
@@ -734,7 +780,10 @@ def _revert_tree() -> None:
     top = _toplevel()
     subprocess.run(["git", "reset", "-q", "--hard"], cwd=top, capture_output=True)
     if _cfg.clean == "clean":
-        subprocess.run(["git", "clean", "-fdxq"], cwd=top, capture_output=True)
+        # keep our own `.bisect/` (status.md + logs) — a plain `git clean -fdx`
+        # would wipe the report mid-bisect.
+        subprocess.run(["git", "clean", "-fdxq", "-e", _DIRNAME],
+                       cwd=top, capture_output=True)
 
 
 # ------------------------------------------------------------------- finalize
@@ -773,20 +822,20 @@ def _refresh_status_md(decided: bool = False) -> None:
     complete and shows the first-bad commit.
     """
     try:
-        import bisectlog
+        from . import _report
         log_text = None
         outcome = _final.get("outcome")
         if decided and _in_git() and outcome in ("good", "bad", "skip"):
             log = _git("bisect", "log", check=False)
             if log:
                 log_text = f"{log}\ngit bisect {outcome} {sha()}\n"
-        rep = bisectlog.build_report(
+        rep = _report.build_report(
             _toplevel(), log_text=log_text, logs_dir=str(_logs_dir()))
         if rep is None:
             return
         path = _status_md_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(bisectlog.render_markdown(rep, details=True))
+        path.write_text(_report.render_markdown(rep, details=True))
     except Exception:
         pass  # rendering is best-effort, never breaks the recipe
 
@@ -796,8 +845,9 @@ def _flush_status() -> None:
 
     Called after every step so the current commit's `eval.json` and the rendered
     `status.md` reflect progress live (the commit shows as the in-flight `todo`
-    row with its steps so far) — a file you can `bisectlog --watch` or tail while
-    a long build/test runs, instead of only seeing it once the verdict lands.
+    row with its steps so far) — open `.bisect/status.md` in your editor and it
+    refreshes as a long build/test runs, instead of only updating once the
+    verdict lands.
     """
     _write_sidecar()
     _refresh_status_md()

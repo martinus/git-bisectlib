@@ -75,7 +75,7 @@ class TestEngine(unittest.TestCase):
                "b.test('true')\nb.test('echo hi | grep -q hi')\nb.test('true')\n")
         self.assertEqual(code, 0)
         # all three ran and were recorded
-        ev = json.loads(next(Path(cache, "bisectlib").glob("*/*/eval.json")).read_text())
+        ev = json.loads(next(Path(d, ".bisect").glob("*/eval.json")).read_text())
         self.assertEqual([s["verb"] for s in ev["steps"]], ["test", "test", "test"])
 
         # a later failing test makes the whole thing BAD
@@ -89,7 +89,7 @@ class TestEngine(unittest.TestCase):
         code3, _, cache3 = run_recipe(
             d3, "import bisectlib as b\nb.test('false')\nb.test('true')\n")
         self.assertEqual(code3, 1)
-        ev3 = json.loads(next(Path(cache3, "bisectlib").glob("*/*/eval.json")).read_text())
+        ev3 = json.loads(next(Path(d3, ".bisect").glob("*/eval.json")).read_text())
         self.assertEqual(len(ev3["steps"]), 1)  # second test did not run
 
     def test_flaky_min_passes(self):
@@ -101,7 +101,7 @@ class TestEngine(unittest.TestCase):
         code, _, cache = run_recipe(d, body)
         self.assertEqual(code, 0)  # 2 passes meets min_passes=2 -> good
         # early stop: should have stopped at 2 attempts (verdict locked)
-        ev = json.loads(next(Path(cache, "bisectlib").glob("*/*/eval.json")).read_text())
+        ev = json.loads(next(Path(d, ".bisect").glob("*/eval.json")).read_text())
         self.assertEqual(ev["steps"][0]["executed"], 2)
 
         # min_passes=3 cannot be met (only 2 ever pass) -> bad
@@ -272,8 +272,8 @@ class TestEngine(unittest.TestCase):
         # command output is shown live (to stderr), not swallowed
         self.assertIn("UNIQ_BUILD_MARKER", stderr)
         self.assertIn("UNIQ_TEST_MARKER", stderr)
-        # and the old "bisectlog status:" announcement is gone
-        self.assertNotIn("bisectlog status", stderr)
+        # status.md is written silently — no per-step status announcement on stderr
+        self.assertNotIn("status:", stderr)
 
     def test_log_streams_live_and_records_running_step(self):
         # the log file must be written *as output arrives* (watchable), and the
@@ -296,10 +296,10 @@ class TestEngine(unittest.TestCase):
             deadline = time.time() + 2.5  # well before the 3s sleep ends
             live_log = running_step = False
             while time.time() < deadline and proc.poll() is None:
-                logs = list(Path(cache, "bisectlib").glob("*/*/01-run-*.log"))
+                logs = list(Path(d, ".bisect").glob("*/01-run-*.log"))
                 if logs and "LIVE_MARKER" in logs[0].read_text():
                     live_log = True
-                evs = list(Path(cache, "bisectlib").glob("*/*/eval.json"))
+                evs = list(Path(d, ".bisect").glob("*/eval.json"))
                 if evs:
                     steps = json.loads(evs[0].read_text()).get("steps", [])
                     if any(s.get("code") is None for s in steps):
@@ -313,7 +313,7 @@ class TestEngine(unittest.TestCase):
         finally:
             proc.wait()
         # once finished, the running placeholder is replaced by the real result
-        ev = json.loads(next(Path(cache, "bisectlib").glob("*/*/eval.json")).read_text())
+        ev = json.loads(next(Path(d, ".bisect").glob("*/eval.json")).read_text())
         self.assertEqual(len(ev["steps"]), 1)
         self.assertEqual(ev["steps"][0]["code"], 0)
         self.assertNotIn("running", ev["steps"][0])
@@ -410,7 +410,7 @@ class TestEngine(unittest.TestCase):
                 "b.run('true')\nb.test('true')\n")
         code, _, cache = run_recipe(d, body)
         self.assertEqual(code, 0)
-        evals = list(Path(cache, "bisectlib").glob("*/*/eval.json"))
+        evals = list(Path(d, ".bisect").glob("*/eval.json"))
         self.assertTrue(evals, "expected an eval.json sidecar")
         data = json.loads(evals[0].read_text())
         self.assertEqual(data["outcome"], "good")
@@ -436,7 +436,7 @@ class TestEngine(unittest.TestCase):
                 "b.test('true', attempts=3, min_passes=2)\n")
         code, _, cache = run_recipe(d, body)
         self.assertEqual(code, 0)
-        ev = next(Path(cache, "bisectlib").glob("*/*/eval.json"))
+        ev = next(Path(d, ".bisect").glob("*/eval.json"))
         step = json.loads(ev.read_text())["steps"][0]
         self.assertRegex(step["log"], r"-test-.*-\d+\.log$")
         self.assertTrue((ev.parent / step["log"]).is_file())
@@ -467,9 +467,9 @@ class TestEngine(unittest.TestCase):
                "PYTHONPATH": str(ROOT)}
         sh(d, "git", "bisect", "start", shas[-1], shas[0], env=env)
         sh(d, "git", "bisect", "run", sys.executable, "recipe.py", env=env)
-        status = list(Path(cache, "bisectlib").glob("*/status.md"))
-        self.assertTrue(status, "status.md was not written")
-        text = status[0].read_text()
+        status = Path(d, ".bisect", "status.md")
+        self.assertTrue(status.is_file(), "status.md was not written")
+        text = status.read_text()
         self.assertIn("First bad commit", text)
         self.assertIn(bug[:9], text)
         sh(d, "git", "bisect", "reset", env=env)

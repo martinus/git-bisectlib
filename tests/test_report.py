@@ -1,4 +1,5 @@
-"""Tests for bisectlog against a real, freshly-built git repo + bisect session."""
+"""Tests for bisectlib's report reconstruction + Markdown rendering
+(bisectlib._report) against a real, freshly-built git repo + bisect session."""
 import os
 import subprocess
 import sys
@@ -7,7 +8,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import bisectlog  # noqa: E402
+from bisectlib import _report  # noqa: E402
 
 
 def run(cwd, *args, env=None, check=True):
@@ -22,7 +23,7 @@ def run(cwd, *args, env=None, check=True):
 
 def make_repo(n=16, bug_at=11):
     """Build a linear repo of n commits; `bug_at` introduces the regression."""
-    d = tempfile.mkdtemp(prefix="bisectlog-test-")
+    d = tempfile.mkdtemp(prefix="bisect-report-test-")
     run(d, "git", "init", "-q")
     run(d, "git", "config", "user.email", "t@t.t")
     run(d, "git", "config", "user.name", "Tester")
@@ -40,7 +41,7 @@ def make_repo(n=16, bug_at=11):
     return d, shas
 
 
-class TestBisectlog(unittest.TestCase):
+class TestReport(unittest.TestCase):
     def test_full_run_finds_first_bad(self):
         d, shas = make_repo(n=16, bug_at=11)
         bad, good = shas[-1], shas[0]
@@ -54,21 +55,18 @@ class TestBisectlog(unittest.TestCase):
         run(d, "git", "bisect", "start", bad, good)
         run(d, "git", "bisect", "run", "./t.sh")
 
-        rep = bisectlog.build_report(d)
+        rep = _report.build_report(d)
         self.assertIsNotNone(rep)
         self.assertEqual(rep.first_bad, bug_sha)
         self.assertEqual(rep.orig_bad, bad)
         self.assertIn(good, rep.orig_goods)
-        # markdown + html render without error and mention the culprit
-        md = bisectlog.render_markdown(rep)
+        # markdown renders without error and mentions the culprit
+        md = _report.render_markdown(rep)
         self.assertIn("First bad commit", md)
         self.assertIn(bug_sha[:9], md)
         # the full culprit commit is shown git-bisect style: metadata + diffstat
         self.assertIn("Author:", md)
         self.assertIn(" changed, ", md)  # git show --stat summary line
-        html = bisectlog.render_html(rep)
-        self.assertIn("firstbad", html)
-        self.assertIn(" changed, ", html)
         run(d, "git", "bisect", "reset")
 
     def test_midbisect_rows_and_bounds(self):
@@ -82,7 +80,7 @@ class TestBisectlog(unittest.TestCase):
         has_bug = "BUG" in Path(d, "code.txt").read_text()
         run(d, "git", "bisect", "bad" if has_bug else "good")
 
-        rep = bisectlog.build_report(d)
+        rep = _report.build_report(d)
         self.assertIsNotNone(rep)
         self.assertGreaterEqual(len(rep.rows), 1)
         # first row's midpoint is the first commit git checked out
@@ -100,16 +98,16 @@ class TestBisectlog(unittest.TestCase):
     def test_date_delta_tolerates_z_suffix(self):
         # newer git emits UTC as `…T12:00:00Z` for %cI; Python 3.10's
         # fromisoformat rejects the Z suffix, which silently zeroed spans.
-        secs = bisectlog._date_delta_seconds(
+        secs = _report._date_delta_seconds(
             "2026-01-01T12:00:00Z", "2026-01-16T12:00:00Z")
         self.assertEqual(secs, 15 * 86400)
-        self.assertEqual(bisectlog.fmt_date("2026-01-16T12:00:00Z"), "2026-01-16 12:00")
+        self.assertEqual(_report.fmt_date("2026-01-16T12:00:00Z"), "2026-01-16 12:00")
 
     def test_range_count_excludes_all_goods(self):
         # In a merge DAG, git's candidate range excludes ancestors of EVERY good,
         # not just the latest. With a good anchor on a side branch that diverges
         # from the mainline midpoint, counting only `latest_good..bad` overcounts.
-        d = tempfile.mkdtemp(prefix="bisectlog-dag-")
+        d = tempfile.mkdtemp(prefix="bisect-report-dag-")
         run(d, "git", "init", "-q")
         run(d, "git", "config", "user.email", "t@t.t")
         run(d, "git", "config", "user.name", "T")
@@ -137,7 +135,7 @@ class TestBisectlog(unittest.TestCase):
 
         run(d, "git", "bisect", "start", bad, s3)
         run(d, "git", "bisect", "good", firstmid)  # firstmid diverges from s3
-        rep = bisectlog.build_report(d)
+        rep = _report.build_report(d)
         todo = [r for r in rep.rows if r.status == "todo"][0]
         both = int(run(d, "git", "rev-list", "--count", bad, "--not", firstmid, s3).stdout)
         single = int(run(d, "git", "rev-list", "--count", f"{firstmid}..{bad}").stdout)
@@ -155,12 +153,12 @@ class TestBisectlog(unittest.TestCase):
         script.chmod(0o755)
         run(d, "git", "bisect", "start", shas[-1], shas[0])
         run(d, "git", "bisect", "run", "./t.sh")
-        orig = bisectlog.is_ancestor
-        bisectlog.is_ancestor = lambda *a, **k: False  # ancestry can't confirm
+        orig = _report.is_ancestor
+        _report.is_ancestor = lambda *a, **k: False  # ancestry can't confirm
         try:
-            rep = bisectlog.build_report(d)
+            rep = _report.build_report(d)
         finally:
-            bisectlog.is_ancestor = orig
+            _report.is_ancestor = orig
         goods = [r.good for r in rep.rows]
         self.assertGreater(len(set(goods)), 1, "good bound never advanced")
         # ranges must shrink monotonically as bounds tighten
@@ -179,13 +177,13 @@ class TestBisectlog(unittest.TestCase):
         (sc / "eval.json").write_text(json.dumps(
             {"sha": head, "outcome": "good", "exit_code": 0, "pending": True,
              "steps": [{"verb": "run", "cmd": "configure", "code": 0}]}))
-        orig = bisectlog.is_ancestor
-        bisectlog.is_ancestor = lambda *a, **k: False  # ancestry can't confirm range
+        orig = _report.is_ancestor
+        _report.is_ancestor = lambda *a, **k: False  # ancestry can't confirm range
         try:
-            with_sc = bisectlog.build_report(d, logs_dir=logs)
-            without_sc = bisectlog.build_report(d)  # no sidecar → no invented row
+            with_sc = _report.build_report(d, logs_dir=logs)
+            without_sc = _report.build_report(d)  # no sidecar → no invented row
         finally:
-            bisectlog.is_ancestor = orig
+            _report.is_ancestor = orig
         self.assertIn(head, [r.midpoint for r in with_sc.rows])
         self.assertNotIn(head, [r.midpoint for r in without_sc.rows])
         run(d, "git", "bisect", "reset")
@@ -195,8 +193,8 @@ class TestBisectlog(unittest.TestCase):
         run(d, "git", "bisect", "start", shas[-1], shas[0])
         has_bug = "BUG" in Path(d, "code.txt").read_text()
         run(d, "git", "bisect", "bad" if has_bug else "good")
-        rep = bisectlog.build_report(d)
-        table = bisectlog.render_markdown(rep).split("## Details")[0]
+        rep = _report.build_report(d)
+        table = _report.render_markdown(rep).split("## Details")[0]
         self.assertIn("Tester", table)                       # author shown in cells
         self.assertRegex(table, r"`[0-9a-f]{9}` 2026-01-\d\d")  # sha + commit date
         self.assertNotIn("commit 8", table)                  # subject NOT in cells
@@ -214,8 +212,8 @@ class TestBisectlog(unittest.TestCase):
             {"sha": head, "outcome": "good", "exit_code": 0, "pending": False,
              "steps": [{"verb": "run", "cmd": "make", "code": 0, "duration_s": 1.0,
                         "log": "01-run-make.log"}]}))
-        rep = bisectlog.build_report(d, logs_dir=logs)
-        md = bisectlog.render_markdown(rep, details=True)
+        rep = _report.build_report(d, logs_dir=logs)
+        md = _report.render_markdown(rep, details=True)
         self.assertIn(f"[run]({head}/01-run-make.log)", md)   # step cell is a link
         run(d, "git", "bisect", "reset")
 
@@ -233,15 +231,12 @@ class TestBisectlog(unittest.TestCase):
              "steps": [{"verb": "run", "cmd": "make -j", "code": None,
                         "duration_s": None, "log": "01-run-make.log",
                         "running": True}]}))
-        rep = bisectlog.build_report(d, logs_dir=logs)
-        md = bisectlog.render_markdown(rep, details=True)
+        rep = _report.build_report(d, logs_dir=logs)
+        md = _report.render_markdown(rep, details=True)
         # top-level table names the in-flight command; details link its live log
         self.assertIn("running `make -j`", md)
         self.assertIn(f"[run]({head}/01-run-make.log)", md)
         self.assertIn("⏳", md)
-        html = bisectlog.render_html(rep, details=True)
-        self.assertIn("running", html)
-        self.assertIn(f"{head}/01-run-make.log", html)
         run(d, "git", "bisect", "reset")
 
     def test_in_progress_row_uses_finalized_sidecar_verdict(self):
@@ -260,12 +255,12 @@ class TestBisectlog(unittest.TestCase):
 
         # a finalized sidecar surfaces the real verdict on the in-flight row
         write(pending=False, outcome="bad")
-        rep = bisectlog.build_report(d, logs_dir=logs)
+        rep = _report.build_report(d, logs_dir=logs)
         row = next(r for r in rep.rows if r.midpoint == head)
         self.assertEqual(row.status, "bad")
         # while still pending, it stays `todo`
         write(pending=True, outcome="good")
-        rep = bisectlog.build_report(d, logs_dir=logs)
+        rep = _report.build_report(d, logs_dir=logs)
         row = next(r for r in rep.rows if r.midpoint == head)
         self.assertEqual(row.status, "todo")
         run(d, "git", "bisect", "reset")
@@ -279,12 +274,12 @@ class TestBisectlog(unittest.TestCase):
         m1 = run(d, "git", "rev-parse", "HEAD").stdout.strip()
         has_bug = "BUG" in Path(d, "code.txt").read_text()
         run(d, "git", "bisect", "bad" if has_bug else "good")
-        orig = bisectlog.is_ancestor
-        bisectlog.is_ancestor = lambda *a, **k: False  # emulate the failing check
+        orig = _report.is_ancestor
+        _report.is_ancestor = lambda *a, **k: False  # emulate the failing check
         try:
-            rep = bisectlog.build_report(d)
+            rep = _report.build_report(d)
         finally:
-            bisectlog.is_ancestor = orig
+            _report.is_ancestor = orig
         self.assertIn(m1, [r.midpoint for r in rep.rows])
         run(d, "git", "bisect", "reset")
 
@@ -293,13 +288,13 @@ class TestBisectlog(unittest.TestCase):
         run(d, "git", "bisect", "start", shas[-1], shas[0])
         has_bug = "BUG" in Path(d, "code.txt").read_text()
         run(d, "git", "bisect", "bad" if has_bug else "good")
-        rep = bisectlog.build_report(d)
-        rep.rows[0].sidecar = bisectlog.Sidecar(
+        rep = _report.build_report(d)
+        rep.rows[0].sidecar = _report.Sidecar(
             fixups=[{"kind": "replace", "path": "f",
                      "detail": "OLD_VALUE → NEW_VALUE"}], steps=[])
-        md = bisectlog.render_markdown(rep, details=True)
-        self.assertIn("| good | bad | midpoint | range | status |", md)  # swapped
-        self.assertRegex(md, r"🟢|🔴")                     # new status icons
+        md = _report.render_markdown(rep, details=True)
+        self.assertIn("| good | bad | midpoint | range | status |", md)
+        self.assertRegex(md, r"🟢|🔴")                     # status icons
         self.assertNotIn("✅", md)
         self.assertNotIn("→ ", md.split("## Details")[0])  # no dates/arrows in range
         self.assertIn("`OLD_VALUE → NEW_VALUE`", md)        # full fixup in backticks
@@ -307,65 +302,23 @@ class TestBisectlog(unittest.TestCase):
 
     def test_no_bisect_returns_none(self):
         d, _ = make_repo(n=4, bug_at=3)
-        self.assertIsNone(bisectlog.build_report(d))
+        self.assertIsNone(_report.build_report(d))
 
     def test_render_from_saved_log(self):
         d, shas = make_repo(n=8, bug_at=5)
         run(d, "git", "bisect", "start", shas[-1], shas[0])
         run(d, "git", "bisect", "good" if "BUG" not in Path(d, "code.txt").read_text()
             else "bad")
-        log = bisectlog.bisect_log(d)
-        rep = bisectlog.build_report(d, log_text=log)
+        log = _report.bisect_log(d)
+        rep = _report.build_report(d, log_text=log)
         self.assertIsNotNone(rep)
         run(d, "git", "bisect", "reset")
 
-    def test_render_terminal(self):
-        d, shas = make_repo(n=12, bug_at=8)
-        script = Path(d, "t.sh")
-        script.write_text("#!/bin/sh\ngrep -q BUG code.txt && exit 1\nexit 0\n")
-        script.chmod(0o755)
-        run(d, "git", "bisect", "start", shas[-1], shas[0])
-        run(d, "git", "bisect", "run", "./t.sh")
-        rep = bisectlog.build_report(d)
-
-        # plain (no color): aligned rows, no markdown table pipes, has statuses
-        plain = bisectlog.render_terminal(rep, color=False, width=100)
-        self.assertNotIn("|", plain)
-        self.assertIn("first bad commit", plain)
-        self.assertTrue(any(w in plain for w in ("good", "bad")))
-        self.assertIn(rep.first_bad[:9], plain)
-        # colored output carries ANSI escapes
-        colored = bisectlog.render_terminal(rep, color=True, width=100)
-        self.assertIn("\033[", colored)
-        run(d, "git", "bisect", "reset")
-
-    def test_render_terminal_truncates_long_subject(self):
-        d = tempfile.mkdtemp(prefix="bisectlog-trunc-")
-        run(d, "git", "init", "-q")
-        run(d, "git", "config", "user.email", "t@t.t")
-        run(d, "git", "config", "user.name", "T")
-        longmsg = "this is an intentionally very long commit subject line to shorten"
-        shas = []
-        for i in range(1, 6):
-            Path(d, "code.txt").write_text("BUG\n" if i >= 4 else "ok\n")
-            Path(d, f"f{i}").write_text(str(i))
-            run(d, "git", "add", "-A")
-            run(d, "git", "commit", "-q", "-m", f"commit {i}: {longmsg}")
-            shas.append(run(d, "git", "rev-parse", "HEAD").stdout.strip())
-        run(d, "git", "bisect", "start", shas[-1], shas[0])
-        run(d, "git", "bisect", "run", "sh", "-c", "grep -q BUG code.txt && exit 1; exit 0")
-        rep = bisectlog.build_report(d)
-        narrow = bisectlog.render_terminal(rep, color=False, width=70)
-        rows = [ln for ln in narrow.splitlines() if "…" in ln]
-        self.assertTrue(rows, "expected a truncated subject")
-        self.assertTrue(all(len(ln) <= 70 for ln in rows))
-        run(d, "git", "bisect", "reset")
-
     def test_fmt_duration(self):
-        self.assertEqual(bisectlog.fmt_duration(0), "0m")
-        self.assertEqual(bisectlog.fmt_duration(90), "1m")
-        self.assertEqual(bisectlog.fmt_duration(3700), "1h 1m")
-        self.assertEqual(bisectlog.fmt_duration(90000), "1d 1h 0m")
+        self.assertEqual(_report.fmt_duration(0), "0m")
+        self.assertEqual(_report.fmt_duration(90), "1m")
+        self.assertEqual(_report.fmt_duration(3700), "1h 1m")
+        self.assertEqual(_report.fmt_duration(90000), "1d 1h 0m")
 
 
 if __name__ == "__main__":

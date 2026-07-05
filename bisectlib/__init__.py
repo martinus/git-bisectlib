@@ -57,7 +57,7 @@ from typing import Callable, Literal, NoReturn, Optional, Union
 _BadWhen = Literal["fail", "pass"]
 _OnTimeout = Literal["abort", "skip", "bad"]
 
-__version__ = "0.14.3"
+__version__ = "0.14.4"
 
 __all__ = [
     "run", "test", "hammer", "check",       # the verbs
@@ -133,13 +133,46 @@ def _git(*args: str, check: bool = True) -> str:
     return p.stdout.strip()
 
 
+# `git bisect run` spawns a fresh process per commit, so within one process the
+# repo root, HEAD and "am I in a repo" never change — yet they're queried on
+# every step and every status render (measured: dozens of `git rev-parse`
+# subprocesses per commit). Memoise them for the process, keyed by cwd so the
+# rare in-process caller that switches repositories still gets the right answer.
+_toplevel_cache: dict[str, str] = {}
+_sha_cache: dict[str, str] = {}
+
+
 def _toplevel() -> str:
-    return _git("rev-parse", "--show-toplevel")
+    cwd = os.getcwd()
+    top = _toplevel_cache.get(cwd)
+    if top is None:
+        top = _git("rev-parse", "--show-toplevel")  # raises (uncached) if not a repo
+        _toplevel_cache[cwd] = top
+    return top
 
 
 def sha() -> str:
     """Full sha of the commit currently being evaluated (HEAD)."""
-    return _git("rev-parse", "HEAD")
+    cwd = os.getcwd()
+    head = _sha_cache.get(cwd)
+    if head is None:
+        head = _git("rev-parse", "HEAD")
+        _sha_cache[cwd] = head
+    return head
+
+
+_bisectlog_cache: dict[str, str] = {}
+
+
+def _bisect_log() -> str:
+    """`git bisect log`, cached for the process. git records *this* commit's mark
+    only after we exit, so the log is fixed for our lifetime — read it once and
+    feed it to every status render (and to the anchor scan) rather than re-running
+    it per render."""
+    cwd = os.getcwd()
+    if cwd not in _bisectlog_cache:
+        _bisectlog_cache[cwd] = _git("bisect", "log", check=False)
+    return _bisectlog_cache[cwd]
 
 
 def subject() -> str:
@@ -231,9 +264,17 @@ def _echo_result(verb: str, cmd: str, ok: bool, seconds: float, label: str) -> N
     sys.stderr.flush()
 
 
+_ingit_cache: dict[str, bool] = {}
+
+
 def _in_git() -> bool:
-    return subprocess.run(["git", "rev-parse", "--git-dir"],
-                          capture_output=True).returncode == 0
+    cwd = os.getcwd()
+    inside = _ingit_cache.get(cwd)
+    if inside is None:
+        inside = subprocess.run(["git", "rev-parse", "--git-dir"],
+                                capture_output=True).returncode == 0
+        _ingit_cache[cwd] = inside
+    return inside
 
 
 # ---------------------------------------------------------------------- Result
@@ -361,7 +402,7 @@ def _bisect_anchors() -> tuple[str, Optional[str], Optional[str]]:
     except RuntimeError:
         top = os.getcwd()
     bad0 = good0 = None
-    for line in _git("bisect", "log", check=False).splitlines():
+    for line in _bisect_log().splitlines():
         if not line.startswith("git bisect "):
             continue
         try:
@@ -1103,14 +1144,19 @@ def _refresh_status_md(decided: bool = False) -> None:
     """
     try:
         from . import _report
-        log_text = None
+        if not _in_git():
+            return
+        head = sha()
+        # Feed the report our process-constant HEAD and bisect log instead of
+        # letting it re-query them on every render. On the *final* commit git has
+        # not yet recorded our mark, so append it so the finished report names the
+        # first-bad commit (see docstring).
+        log_text = _bisect_log()
         outcome = _final.get("outcome")
-        if decided and _in_git() and outcome in ("good", "bad", "skip"):
-            log = _git("bisect", "log", check=False)
-            if log:
-                log_text = f"{log}\ngit bisect {outcome} {sha()}\n"
+        if decided and outcome in ("good", "bad", "skip") and log_text:
+            log_text = f"{log_text}\ngit bisect {outcome} {head}\n"
         rep = _report.build_report(
-            _toplevel(), log_text=log_text, logs_dir=str(_logs_dir()))
+            _toplevel(), log_text=log_text, logs_dir=str(_logs_dir()), head=head)
         if rep is None:
             return
         path = _status_md_path()

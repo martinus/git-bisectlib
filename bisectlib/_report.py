@@ -53,19 +53,43 @@ def git_ok(repo: str, *args: str) -> bool:
     )
 
 
+# `git bisect run` re-renders the report after every step, but commit-graph facts
+# — a rev's sha, ancestry, a range's size, a commit's metadata — and the bisect
+# terms never change within a process; only the sidecars do. Memoise those graph
+# queries keyed by their inputs (repo included, so several repos in one process
+# never collide). The cached values are immutable, so the report a caller gets is
+# identical to the uncached one; only the redundant git subprocesses go away.
+# Sidecars and HEAD are deliberately never cached (they move as the bisect runs).
+_terms_cache: dict = {}
+_ancestor_cache: dict = {}
+_resolve_cache: dict = {}
+_meta_cache: dict = {}
+_rangecount_cache: dict = {}
+_toplevel_cache: dict = {}
+
+
 def is_ancestor(repo: str, a: str, b: str) -> bool:
     """True if commit ``a`` is an ancestor of ``b`` (or a == b)."""
     if a == b:
         return True
-    return git_ok(repo, "merge-base", "--is-ancestor", a, b)
+    key = (repo, a, b)
+    hit = _ancestor_cache.get(key)
+    if hit is None:
+        hit = git_ok(repo, "merge-base", "--is-ancestor", a, b)
+        _ancestor_cache[key] = hit
+    return hit
 
 
 # ------------------------------------------------------------------- bisect terms
 def bisect_terms(repo: str) -> tuple[str, str]:
     """Return (bad_term, good_term), honouring custom terms; default bad/good."""
-    bad = git(repo, "bisect", "terms", "--term-bad", check=False) or "bad"
-    good = git(repo, "bisect", "terms", "--term-good", check=False) or "good"
-    return bad.strip() or "bad", good.strip() or "good"
+    hit = _terms_cache.get(repo)
+    if hit is None:
+        bad = git(repo, "bisect", "terms", "--term-bad", check=False) or "bad"
+        good = git(repo, "bisect", "terms", "--term-good", check=False) or "good"
+        hit = (bad.strip() or "bad", good.strip() or "good")
+        _terms_cache[repo] = hit
+    return hit
 
 
 def bisect_log(repo: str) -> str:
@@ -170,9 +194,19 @@ def build_report(
     repo: str,
     log_text: Optional[str] = None,
     logs_dir: Optional[str] = None,
+    head: Optional[str] = None,
 ) -> Optional[Report]:
-    """Reconstruct the full bisect report from `git bisect log` + commit info."""
-    repo = git(repo, "rev-parse", "--show-toplevel")
+    """Reconstruct the full bisect report from `git bisect log` + commit info.
+
+    ``log_text`` and ``head`` may be supplied by a caller that already knows them
+    (the engine holds both fixed for its process); when omitted they are read from
+    git. Everything else derives from the immutable commit graph and is memoised.
+    """
+    given = repo
+    repo = _toplevel_cache.get(given)
+    if repo is None:
+        repo = git(given, "rev-parse", "--show-toplevel")
+        _toplevel_cache[given] = repo
     if log_text is None:
         log_text = bisect_log(repo)
     if not log_text.strip():
@@ -182,8 +216,12 @@ def build_report(
     ops = parse_log(log_text)
 
     def resolve(rev: str) -> Optional[str]:
-        out = git(repo, "rev-parse", "--verify", "--quiet", rev + "^{commit}", check=False)
-        return out or None
+        key = (repo, rev)
+        if key not in _resolve_cache:
+            out = git(repo, "rev-parse", "--verify", "--quiet",
+                      rev + "^{commit}", check=False)
+            _resolve_cache[key] = out or None
+        return _resolve_cache[key]
 
     orig_bad: Optional[str] = None
     orig_goods: list[str] = []
@@ -276,7 +314,8 @@ def build_report(
                 add_row(sha, "skip")
             # a skip before ready is unusual; ignore for bounds
 
-    head = git(repo, "rev-parse", "HEAD", check=False) or None
+    if head is None:
+        head = git(repo, "rev-parse", "HEAD", check=False) or None
 
     # Determine the first-bad answer / progress. The candidate set is commits
     # reachable from bad but from NONE of the goods (git excludes ancestors of
@@ -285,7 +324,12 @@ def build_report(
         goods = [g for g in goods if g]
         if not goods:
             return 0
-        return int(git(repo, "rev-list", "--count", bad, "--not", *goods) or 0)
+        key = (repo, bad, tuple(goods))
+        hit = _rangecount_cache.get(key)
+        if hit is None:
+            hit = int(git(repo, "rev-list", "--count", bad, "--not", *goods) or 0)
+            _rangecount_cache[key] = hit
+        return hit
 
     first_bad: Optional[str] = None
     n_remaining = None
@@ -393,11 +437,16 @@ def _commit_meta(repo: str, shas) -> tuple[dict, dict, dict]:
     for sha in shas:
         if not sha:
             continue
-        out = git(repo, "show", "-s", "--format=%s%n%cI%n%an", sha, check=False)
-        parts = out.split("\n", 2)
-        subjects[sha] = parts[0] if len(parts) > 0 else ""
-        dates[sha] = parts[1] if len(parts) > 1 else ""
-        authors[sha] = parts[2] if len(parts) > 2 else ""
+        key = (repo, sha)
+        hit = _meta_cache.get(key)
+        if hit is None:
+            out = git(repo, "show", "-s", "--format=%s%n%cI%n%an", sha, check=False)
+            parts = out.split("\n", 2)
+            hit = (parts[0] if len(parts) > 0 else "",
+                   parts[1] if len(parts) > 1 else "",
+                   parts[2] if len(parts) > 2 else "")
+            _meta_cache[key] = hit
+        subjects[sha], dates[sha], authors[sha] = hit
     return subjects, dates, authors
 
 

@@ -346,6 +346,31 @@ class TestReport(unittest.TestCase):
         self.assertIn("32× parallel", summary)
         self.assertIn("1m00s", summary)
 
+    def test_report_memoisation_is_correct(self):
+        # build_report caches immutable graph facts across renders. Two things must
+        # hold: rendering the same finished bisect twice is byte-identical (the
+        # cache-hit path returns the same answer), and a *different* repo in the
+        # same process is not contaminated by the first repo's cached values
+        # (caches are keyed by repo).
+        d1, shas1 = make_repo(n=12, bug_at=7)
+        script = Path(d1, "t.sh")
+        script.write_text("#!/bin/sh\ngrep -q BUG code.txt && exit 1\nexit 0\n")
+        script.chmod(0o755)
+        run(d1, "git", "bisect", "start", shas1[-1], shas1[0])
+        run(d1, "git", "bisect", "run", "./t.sh")
+        md_a = _report.render_markdown(_report.build_report(d1))
+        md_b = _report.render_markdown(_report.build_report(d1))  # 2nd render: all cache hits
+        self.assertEqual(md_a, md_b)
+        self.assertIn("First bad commit", md_a)
+        run(d1, "git", "bisect", "reset")
+
+        d2, shas2 = make_repo(n=8, bug_at=5)  # unrelated repo, same process
+        run(d2, "git", "bisect", "start", shas2[-1], shas2[0])
+        rep2 = _report.build_report(d2)
+        self.assertEqual(rep2.orig_bad, shas2[-1])   # its own anchors, not d1's
+        self.assertIn(shas2[0], rep2.orig_goods)
+        run(d2, "git", "bisect", "reset")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

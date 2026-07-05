@@ -543,6 +543,10 @@ class TestEngine(unittest.TestCase):
             "b.configure(clean='wipe')",
             "b.in_range('v1.0...v2.0')",             # three dots
             "b.in_range('onlyonerev')",              # missing high bound
+            "b.hammer('true', parallel=0)",          # parallel must be >= 1
+            "b.hammer('true', for_seconds=0)",       # budget must be > 0
+            "b.hammer('true', bad_when='Nope')",     # typo'd enum
+            "b.hammer('true', on_timeout='xyz')",    # typo'd enum
         ]
         for expr in cases:
             code, _, _ = run_recipe(d, f"import bisectlib as b\n{expr}\n")
@@ -576,6 +580,92 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(Path(logs, "keep_me.txt").is_file(),
                         "unrelated user file must not be deleted")
+
+    # -------------------------------------------------------- hammer (flaky-hunt)
+    def _hammer_step(self, d):
+        """The first recorded step from the most recent eval.json sidecar."""
+        ev = json.loads(next(Path(d, ".bisect").glob("*/eval.json")).read_text())
+        return ev["steps"][0]
+
+    def test_hammer_good_loops_for_the_budget(self):
+        # an always-passing command: GOOD, and it must actually loop many times
+        # within the budget (not run once).
+        d = make_repo()
+        code, _, _ = run_recipe(
+            d, "import bisectlib as b\nb.hammer('true', for_seconds=0.3, parallel=4)\n")
+        self.assertEqual(code, 0)
+        step = self._hammer_step(d)
+        self.assertEqual(step["verb"], "hammer")
+        self.assertEqual(step["failures"], 0)
+        self.assertEqual(step["parallel"], 4)
+        self.assertGreater(step["executed"], 1)  # hammered, not a single run
+
+    def test_hammer_defaults_all_cores_and_records_runtime(self):
+        # parallel defaults to every core; the step records the run count, the
+        # thread count actually used, and the total wall-clock runtime.
+        import os
+        d = make_repo()
+        code, _, _ = run_recipe(
+            d, "import bisectlib as b\nb.hammer('true', for_seconds=0.2)\n")
+        self.assertEqual(code, 0)
+        step = self._hammer_step(d)
+        self.assertEqual(step["parallel"], os.cpu_count() or 1)  # all cores
+        self.assertGreater(step["executed"], 0)                  # total runs
+        self.assertGreater(step["elapsed_s"], 0)                 # total runtime
+
+    def test_hammer_bad_on_any_failure(self):
+        # any failing run within the budget => BAD (the flaky-hunt verdict)
+        d = make_repo()
+        code, _, _ = run_recipe(
+            d, "import bisectlib as b\nb.hammer('false', for_seconds=1, parallel=4)\n")
+        self.assertEqual(code, 1)
+
+    def test_hammer_catches_a_rare_flake(self):
+        # The point of the feature: a command that passes, passes, then fails on
+        # the 3rd invocation must be caught as BAD — proving hammer keeps going
+        # past early passes rather than trusting the first run. parallel=1 makes
+        # the counter deterministic.
+        d = make_repo()
+        cmd = r"n=$(( $(cat c 2>/dev/null||echo 0)+1 )); echo $n>c; [ $n -ne 3 ]"
+        body = ("import bisectlib as b\n"
+                f"b.hammer({cmd!r}, for_seconds=5, parallel=1)\n")
+        code, _, _ = run_recipe(d, body)
+        self.assertEqual(code, 1)              # the 3rd run failed -> bad
+        step = self._hammer_step(d)
+        self.assertEqual(step["passes"], 2)    # first two passed
+        self.assertEqual(step["failures"], 1)
+        # the failing run's output is captured in the single hammer log
+        log = next(Path(d, ".bisect").glob(f"*/{step['log']}"))
+        self.assertIn("FAIL", log.read_text())
+
+    def test_hammer_is_actually_concurrent(self):
+        # Each run sleeps 0.2s; a 0.5s sequential budget could finish ~2, but with
+        # parallel=4 the first batch of four all complete well inside the budget.
+        # executed>=4 can only happen if the four ran concurrently.
+        d = make_repo()
+        code, _, _ = run_recipe(
+            d, "import bisectlib as b\n"
+               "b.hammer('sleep 0.2', for_seconds=0.5, parallel=4)\n")
+        self.assertEqual(code, 0)
+        self.assertGreaterEqual(self._hammer_step(d)["executed"], 4)
+
+    def test_hammer_benchmark_predicate(self):
+        # passed= still defines a "failing" run: fail if any run is slower than the
+        # ceiling. sleep 0.05 is always slower than 0.01 -> BAD.
+        d = make_repo()
+        code, _, _ = run_recipe(
+            d, "import bisectlib as b\n"
+               "b.hammer('sleep 0.05', for_seconds=0.4, parallel=2, "
+               "passed=lambda r: r.seconds < 0.01)\n")
+        self.assertEqual(code, 1)
+
+    def test_hammer_unrunnable_aborts(self):
+        # a command that can't be launched is a broken recipe -> ABORT, not bad
+        d = make_repo()
+        code, _, _ = run_recipe(
+            d, "import bisectlib as b\n"
+               "b.hammer('./nonexistent-binary', for_seconds=2, parallel=4)\n")
+        self.assertEqual(code, 128)
 
 
 if __name__ == "__main__":

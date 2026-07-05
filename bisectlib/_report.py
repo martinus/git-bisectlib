@@ -442,6 +442,21 @@ def fmt_duration(seconds: int) -> str:
     return f"{m}m"
 
 
+def short_seconds(seconds) -> str:
+    """Compact runtime: '45s', '1m03s', '2h05m'. Used for hammer's total wall time."""
+    try:
+        s = int(round(float(seconds)))
+    except (ValueError, TypeError):
+        return "?"
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
 def fmt_date(iso: str) -> str:
     try:
         return _parse_iso(iso).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -502,14 +517,26 @@ def _step_summary(sc: Optional[Sidecar]) -> str:
             return f"⏳ running `{cmd}`"
     bits = []
     for s in sc.steps:
-        if s.verb != "test":
-            continue
-        executed = s.extra.get("executed")
-        if executed and executed > 1:
-            bits.append(f"{s.extra.get('passes', 0)}/{executed}")
+        if s.verb == "hammer":
+            # total runs, parallel threads used, and total runtime
+            seg = [f"{s.extra.get('executed', 0)} runs"]
+            par = s.extra.get("parallel")
+            if par:
+                seg.append(f"{par}× parallel")
+            el = s.extra.get("elapsed_s")
+            if el is not None:
+                seg.append(short_seconds(el))
+            bits.append(" · ".join(seg))
             d = s.extra.get("durations_s")
             if d:
                 bits.append(f"min {min(d):.3g}s")
+        elif s.verb == "test":
+            executed = s.extra.get("executed")
+            if executed and executed > 1:
+                bits.append(f"{s.extra.get('passes', 0)}/{executed}")
+                d = s.extra.get("durations_s")
+                if d:
+                    bits.append(f"min {min(d):.3g}s")
     if not bits and sc.duration_s is not None:
         bits.append(f"{sc.duration_s:.3g}s")
     return " · ".join(bits)
@@ -596,6 +623,18 @@ def render_markdown(rep: Report, details: bool = False, color: bool = True) -> s
                         for f in r.sidecar.fixups
                     )
                     lines.append(f"- fixups: {fx}")
+                for s in r.sidecar.steps:
+                    if s.verb != "hammer":
+                        continue
+                    el = s.extra.get("elapsed_s")
+                    rt = short_seconds(el) if el is not None else "?"
+                    lines.append(
+                        f"- hammer: **{s.extra.get('executed', 0)} runs** · "
+                        f"**{s.extra.get('parallel', '?')}× parallel** · "
+                        f"**{rt}** total · "
+                        f"{s.extra.get('passes', 0)} passed, "
+                        f"{s.extra.get('failures', 0)} failed"
+                    )
                 lines.append("")
                 lines.append("| step | cmd | exit | time |")
                 lines.append("|------|-----|------|------|")

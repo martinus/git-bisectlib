@@ -22,6 +22,8 @@ Verbs:
     run(cmd, skip_on_error=False, ...)        infra; ABORTS on error by default
     test(cmd, attempts=1, min_passes=None,…)  a verdict; pass->continue, fail->BAD.
                                               Use several; they AND together.
+    hammer(cmd, for_seconds=60, ...)          hunt a rare flake: run til one fails
+                                              (default: all cores for a minute)
     check(cmd) -> Result                      runs once, NEVER exits (introspection)
     once(key="setup") -> bool                 guard one-time setup: if once(): ...
     good()/bad()/skip()/abort()               decide the commit directly from Python
@@ -48,10 +50,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Union
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 __all__ = [
-    "run", "test", "check",                 # the verbs
+    "run", "test", "hammer", "check",       # the verbs
     "once",                                  # guard one-time setup (keyed)
     "good", "bad", "skip", "abort",         # verdict primitives
     "replace", "fixup",                     # tree edits (auto-reverted)
@@ -194,9 +196,10 @@ def _use_color() -> bool:
     return sys.stderr.isatty() and "NO_COLOR" not in os.environ
 
 
-_C = {"run": "\033[36m", "test": "\033[35m", "check": "\033[90m",
-      "good": "\033[32m", "bad": "\033[31m", "skip": "\033[33m",
-      "abort": "\033[91m", "dim": "\033[2m", "reset": "\033[0m"}
+_C = {"run": "\033[36m", "test": "\033[35m", "hammer": "\033[95m",
+      "check": "\033[90m", "good": "\033[32m", "bad": "\033[31m",
+      "skip": "\033[33m", "abort": "\033[91m", "dim": "\033[2m",
+      "reset": "\033[0m"}
 
 
 def _echo_start(verb: str, cmd: str) -> None:
@@ -256,7 +259,7 @@ def _clean_env(workdir: str) -> dict:
 
 
 def _exec(cmd: str, timeout: Optional[float], log_path: Optional[Path],
-          cwd: Optional[str] = None) -> Result:
+          cwd: Optional[str] = None, stream: bool = True) -> Result:
     """Run a shell command, streaming its output live while also capturing it.
 
     Combined stdout+stderr is echoed to this process's stderr as it arrives (so
@@ -264,6 +267,10 @@ def _exec(cmd: str, timeout: Optional[float], log_path: Optional[Path],
     appended line-by-line to the log file so it can be tailed/opened *while the
     command runs*, and collected into the returned Result. The process group is
     killed on timeout.
+
+    ``stream=False`` suppresses the live stderr echo (but still captures + logs).
+    Used when many runs execute concurrently, where interleaving dozens of output
+    streams onto one terminal would be unreadable.
     """
     start = time.monotonic()
     workdir = _workdir(cwd)
@@ -288,13 +295,15 @@ def _exec(cmd: str, timeout: Optional[float], log_path: Optional[Path],
     def _pump() -> None:
         for line in proc.stdout:            # line-buffered; live as it arrives
             captured.append(line)
-            sys.stderr.write(line)
+            if stream:
+                sys.stderr.write(line)
             if log_fh is not None:
                 try:
                     log_fh.write(line)
                 except OSError:
                     pass
-        sys.stderr.flush()
+        if stream:
+            sys.stderr.flush()
 
     pump = threading.Thread(target=_pump, daemon=True)
     pump.start()
@@ -603,6 +612,7 @@ def test(cmd: str, *, attempts: int = 1, min_passes: Optional[int] = None,
     pass (default: all). Evaluation **stops as soon as the verdict is known** — at
     the moment ``min_passes`` is reached (good), or once the remaining attempts can
     no longer reach it (bad) — so ``attempts`` is an upper bound, not a fixed count.
+    (To hunt a *rare* flake — fail on the first bad run of many — use ``hammer``.)
 
     ``passed`` decides whether one attempt passed: a callable receiving the
     :class:`Result` (``.code``, ``.ok``, ``.out``, ``.seconds``) and returning
@@ -703,6 +713,180 @@ def test(cmd: str, *, attempts: int = 1, min_passes: Optional[int] = None,
     if not good:
         _decide(BAD)
     return last  # good: continue to the next step (multiple tests AND together)
+
+
+def _hammer_log(fh, n: int, kind: str, res: Result) -> None:
+    """Append one line per completed run to the shared hammer log, plus the full
+    output of any run that didn't pass (so a rare failure is captured even though
+    the thousands of passing runs before it were not individually logged)."""
+    label = {"pass": "pass", "fail": "FAIL", "timeout": "TIMEOUT",
+             "unrunnable": "UNRUNNABLE"}.get(kind, kind)
+    try:
+        fh.write(f"run {n:>6}: {label:<10} exit={res.code} {res.seconds:.3f}s\n")
+        if kind != "pass":
+            fh.write("----- output of the failing run -----\n")
+            fh.write(res.out if (not res.out or res.out.endswith("\n")) else res.out + "\n")
+            fh.write("-------------------------------------\n")
+    except OSError:
+        pass
+
+
+def hammer(cmd: str, *, for_seconds: float = 60.0, parallel: Optional[int] = None,
+           passed: Optional[Callable[[Result], bool]] = None,
+           bad_when: str = "fail", timeout: Optional[float] = None,
+           on_timeout: str = "skip", cwd: Optional[str] = None) -> Optional[Result]:
+    """Hunt a rare flake: run ``cmd`` over and over until one fails.
+
+    The mirror image of the flaky-*tolerant* ``test(attempts=…, min_passes=…)``.
+    Where ``test`` runs a quorum and forgives a few failures, ``hammer`` pounds on
+    the command to *expose* a failure that only shows up once in thousands of runs::
+
+        hammer("./flaky")                            # one minute, all cores
+        hammer("./flaky", for_seconds=120, parallel=8)
+
+    It launches runs up to ``parallel`` at a time for ``for_seconds`` of wall-clock
+    time; the defaults are **one minute** and **all CPU cores**
+    (``os.cpu_count()``). The commit is **BAD the instant any run fails** (the
+    search stops and the failing run's output is shown), and **GOOD only if the
+    whole budget elapses with no failure**. Like ``test``, a good verdict continues
+    to the next recipe line, so hammers/tests AND together.
+
+    ``passed`` / ``bad_when`` define what "a failing run" is exactly as in ``test``
+    (default: exit code 0 is a pass), so you can hammer a benchmark for a jitter
+    spike too: ``passed=lambda r: r.seconds < T``. A run that **cannot be launched**
+    (exit 126/127) ABORTS rather than counting as a failure, same as ``test``.
+    """
+    import concurrent.futures as cf
+
+    _one_of("bad_when", bad_when, ("fail", "pass"))
+    _one_of("on_timeout", on_timeout, ("skip", "bad", "abort"))
+    if parallel is None:
+        parallel = os.cpu_count() or 1     # default: use every core
+    elif parallel < 1:
+        raise ValueError(f"parallel={parallel!r} must be >= 1")
+    if for_seconds <= 0:
+        raise ValueError(f"for_seconds={for_seconds!r} must be > 0")
+    _echo_start("hammer", cmd)
+    if passed is None:
+        passed = lambda r: r.ok  # noqa: E731
+
+    idx, slug = len(_steps) + 1, _slug(cmd)
+    log_name = f"{idx:02d}-hammer-{slug}.log"
+    _begin_step("hammer", cmd, log_name)
+    log_path = _commit_log_dir() / log_name
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(log_path, "w", buffering=1)
+    except OSError:
+        log_fh = None
+    # Resolve the working dir once: each run would otherwise re-shell
+    # `git rev-parse --show-toplevel`, needless overhead when firing thousands of
+    # runs. An absolute cwd passes through _workdir untouched.
+    abs_cwd = _workdir(cwd)
+
+    st = {"executed": 0, "passes": 0, "failures": 0, "completed": 0,
+          "min_dur": None, "last": None, "failing": None,
+          "abort_code": None, "timed_out": False, "stop": False}
+    t0 = time.monotonic()
+    deadline = t0 + for_seconds
+
+    def record(res: Result) -> None:
+        # Called only from this (main) thread as futures complete, so no locking:
+        # the worker threads just run _exec and return a Result.
+        st["last"] = res
+        st["completed"] += 1
+        n = st["completed"]
+        if res.code == -1:                       # timed out
+            st["timed_out"] = True
+            st["stop"] = True
+            kind = "timeout"
+        elif res.code in (126, 127):             # unrunnable -> broken recipe
+            st["abort_code"] = res.code
+            st["stop"] = True
+            kind = "unrunnable"
+        else:
+            ok = passed(res)
+            if bad_when == "pass":
+                ok = not ok
+            st["executed"] += 1
+            st["min_dur"] = (res.seconds if st["min_dur"] is None
+                             else min(st["min_dur"], res.seconds))
+            if ok:
+                st["passes"] += 1
+                kind = "pass"
+            else:
+                st["failures"] += 1
+                if st["failing"] is None:
+                    st["failing"] = res
+                st["stop"] = True                # any failure ends the hunt -> BAD
+                kind = "fail"
+        if log_fh is not None:
+            _hammer_log(log_fh, n, kind, res)
+
+    with cf.ThreadPoolExecutor(max_workers=parallel) as ex:
+        inflight: set = set()
+
+        def top_up() -> None:
+            while (len(inflight) < parallel and not st["stop"]
+                   and time.monotonic() < deadline):
+                inflight.add(ex.submit(_exec, cmd, timeout, None, abs_cwd, False))
+
+        top_up()
+        while inflight:
+            done, inflight = cf.wait(inflight, return_when=cf.FIRST_COMPLETED)
+            for fut in done:
+                record(fut.result())
+            if not st["stop"]:
+                top_up()
+    if log_fh is not None:
+        try:
+            log_fh.close()
+        except OSError:
+            pass
+
+    executed, last = st["executed"], st["last"]
+    elapsed = time.monotonic() - t0
+    # The recorded step's duration is the *total* hammer wall time (not the last
+    # run's), so status.md's per-commit total and Details "time" reflect the whole
+    # soak. Carry the run count, thread count and runtime for the report to show.
+    agg = Result(code=(last.code if last else 0), out="", seconds=elapsed)
+    extra = {"executed": executed, "passes": st["passes"],
+             "failures": st["failures"], "parallel": parallel,
+             "for_seconds": for_seconds, "elapsed_s": round(elapsed, 3)}
+    if st["min_dur"] is not None:
+        extra["durations_s"] = [round(st["min_dur"], 4)]  # report shows "min Xs"
+
+    if st["abort_code"] is not None:             # a run could not be launched
+        extra["unrunnable"] = st["abort_code"]
+        _record_step("hammer", cmd, agg, False, log=log_name, extra=extra, outcome="bad")
+        _echo_result("hammer", cmd, False, elapsed, "abort")
+        sys.stderr.write(
+            f"   command exited {st['abort_code']}: it could not be run "
+            f"(missing binary / wrong path / not built?) — aborting so you can fix "
+            f"the recipe, not marking this commit bad\n")
+        _decide(ABORT)
+    if st["timed_out"]:                          # a run exceeded timeout
+        extra["timeout"] = True
+        _record_step("hammer", cmd, agg, False, log=log_name, extra=extra)
+        _echo_result("hammer", cmd, False, elapsed, on_timeout)
+        _decide({"skip": SKIP, "bad": BAD, "abort": ABORT}.get(on_timeout, SKIP))
+
+    good = st["failures"] == 0
+    _record_step("hammer", cmd, agg, good, log=log_name, extra=extra,
+                 outcome="good" if good else "bad")
+    _echo_result("hammer", cmd, good, elapsed, "good" if good else "bad")
+    fastest = f" · min {st['min_dur']:.3g}s" if st["min_dur"] is not None else ""
+    sys.stderr.write(
+        f"   {executed} runs, {parallel}× parallel in {elapsed:.1f}s "
+        f"· {st['passes']} passed, {st['failures']} failed{fastest}\n")
+    if not good:
+        fr = st["failing"]
+        if fr is not None and fr.out:            # show WHY the hunt found a bad run
+            sys.stderr.write("   --- first failing run output (tail) ---\n")
+            for line in fr.out.splitlines()[-20:]:
+                sys.stderr.write(f"   {line}\n")
+        _decide(BAD)
+    return last
 
 
 def check(cmd: str, *, timeout: Optional[float] = None,

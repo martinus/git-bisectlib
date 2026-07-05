@@ -160,16 +160,16 @@ started from.
 ## Install
 
 ```sh
-pip install git+https://github.com/martinus/git-bisectlib
+pip install git+https://github.com/martinus/git_bisectlib
 ```
 
 That gives you `import bisectlib` for recipes anywhere (the distribution is
-`git-bisectlib`, the import is `bisectlib` — like `pyyaml`/`yaml`). It ships a `py.typed`
+`git_bisectlib`, the import is `bisectlib` — like `pyyaml`/`yaml`). It ships a `py.typed`
 marker, so editors and type-checkers resolve `run`, `test`, … with no warnings. To refresh
 a git install to the latest `main`:
 
 ```sh
-pip install --force-reinstall git+https://github.com/martinus/git-bisectlib
+pip install --force-reinstall git+https://github.com/martinus/git_bisectlib
 ```
 
 **Zero-install alternative:** running `python recipe.py` puts the recipe's own directory on

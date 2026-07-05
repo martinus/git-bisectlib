@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "git-bisectlib"
+name = "git_bisectlib"
 version = "0.14.5"
 description = "Write tiny git bisect recipes in Python; watch progress live in .bisect/status.md."
 readme = "README.md"
@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/martinus/git-bisectlib"
+Homepage = "https://github.com/martinus/git_bisectlib"
 
 [tool.setuptools]
 packages = ["bisectlib"]

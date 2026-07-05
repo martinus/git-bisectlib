@@ -57,7 +57,7 @@ from typing import Callable, Literal, NoReturn, Optional, Union
 _BadWhen = Literal["fail", "pass"]
 _OnTimeout = Literal["abort", "skip", "bad"]
 
-__version__ = "0.14.2"
+__version__ = "0.14.3"
 
 __all__ = [
     "run", "test", "hammer", "check",       # the verbs
@@ -388,9 +388,9 @@ def _bisect_id() -> str:
 # The report and per-commit logs live in a single `.bisect/` directory at the
 # repo root — right beside the code being bisected, so `status.md` opens in the
 # editor at a fixed, watchable path (``.bisect/status.md``) instead of a
-# per-run subdir buried under ~/.cache. `.bisect/` is registered in the repo's
-# local excludes (see `_register_exclude`), so it never shows up in `git status`
-# or gets committed, and `git checkout` between commits leaves it untouched.
+# per-run subdir buried under ~/.cache. A `.bisect/.gitignore` of `*` (see
+# `_write_ignore`) keeps it out of `git status` and out of commits, while
+# `git checkout` between commits leaves the untracked dir untouched.
 _DIRNAME = ".bisect"
 _session_ready = False
 _SHA_DIR_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -422,29 +422,23 @@ def _bisect_root() -> Path:
     return Path(top) / _DIRNAME
 
 
-def _register_exclude() -> None:
-    """Add `.bisect/` to the repo's local excludes (`.git/info/exclude`).
+def _write_ignore(root: Path) -> None:
+    """Drop a ``.gitignore`` of ``*`` into the log directory so git ignores the
+    whole thing — report, logs, markers, and the ``.gitignore`` itself (the ``*``
+    self-ignores). This keeps our working-tree directory out of ``git status`` so
+    it is never committed by accident and the recipe's own ``is_clean()`` checks
+    don't trip over an untracked dir.
 
-    Local and untracked — it does not touch the project's own tracked
-    `.gitignore`. This keeps our working-tree directory out of `git status`, so
-    it never gets committed by accident and doesn't make the recipe's own
-    `is_clean()` checks trip over an untracked dir.
+    Preferred over an entry in ``.git/info/exclude`` because it is
+    self-contained: it lives *with* the data (gone the moment you delete the
+    dir, no cruft left behind in ``.git/``) and works identically for a relocated
+    ``configure(logs=…)`` directory, without reaching into the git dir at all.
+    It never touches the project's own tracked ``.gitignore``.
     """
-    if _cfg.logs:  # user pointed logs elsewhere; nothing to exclude
-        return
+    ignore = root / ".gitignore"
     try:
-        git_dir = _git("rev-parse", "--git-dir", check=False)
-        if not git_dir:
-            return
-        info = Path(git_dir) / "info"
-        info.mkdir(parents=True, exist_ok=True)
-        exclude = info / "exclude"
-        entry = f"/{_DIRNAME}/"
-        existing = exclude.read_text() if exclude.exists() else ""
-        if entry not in existing.split():
-            sep = "" if not existing or existing.endswith("\n") else "\n"
-            with open(exclude, "a") as fh:
-                fh.write(f"{sep}{entry}\n")
+        if not ignore.exists() or ignore.read_text() != "*\n":
+            ignore.write_text("*\n")
     except OSError:
         pass
 
@@ -462,10 +456,10 @@ def _ensure_session() -> None:
     if _session_ready:
         return
     _session_ready = True
-    _register_exclude()
     root = _bisect_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
+        _write_ignore(root)   # hide the dir from git (default and custom logs alike)
         idfile = root / "id"
         cur = _bisect_id()
         prev = idfile.read_text().strip() if idfile.exists() else None

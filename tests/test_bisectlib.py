@@ -579,6 +579,33 @@ class TestEngine(unittest.TestCase):
         self.assertTrue(Path(logs, "keep_me.txt").is_file(),
                         "unrelated user file must not be deleted")
 
+    def test_bisect_dir_is_gitignored(self):
+        # .bisect/ hides itself via a `.gitignore` of `*` (which self-ignores),
+        # so nothing under it — report, logs, or the .gitignore — shows in status.
+        d = make_repo()
+        code, _, _ = run_recipe(d, "import bisectlib as b\nb.test('true')\n")
+        self.assertEqual(code, 0)
+        gi = Path(d, ".bisect", ".gitignore")
+        self.assertEqual(gi.read_text(), "*\n")
+        porcelain = sh(d, "git", "status", "--porcelain").stdout
+        self.assertNotIn(".bisect", porcelain)  # fully ignored, incl. its .gitignore
+        # and it never touched .git/info/exclude
+        exclude = Path(d, ".git", "info", "exclude")
+        self.assertNotIn(".bisect", exclude.read_text() if exclude.exists() else "")
+
+    def test_custom_logs_dir_is_gitignored(self):
+        # the gap the switch closes: a relocated logs dir inside the repo also
+        # gets a .gitignore, so it doesn't show up as untracked in git status.
+        d = make_repo()
+        logs = Path(d, "mylogs")  # inside the repo -> would otherwise be untracked
+        body = ("import bisectlib as b\n"
+                f"b.configure(logs={str(logs)!r})\n"
+                "b.test('true')\n")
+        code, _, _ = run_recipe(d, body)
+        self.assertEqual(code, 0)
+        self.assertEqual((logs / ".gitignore").read_text(), "*\n")
+        self.assertNotIn("mylogs", sh(d, "git", "status", "--porcelain").stdout)
+
     # -------------------------------------------------------- hammer (flaky-hunt)
     def _hammer_step(self, d):
         """The first recorded step from the most recent eval.json sidecar."""

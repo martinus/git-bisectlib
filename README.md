@@ -67,11 +67,15 @@ error message. bisectlib makes that distinction the default.
 than mis-marking the commit. `test()` is the actual verdict: pass → good, fail → bad. For a
 genuinely un-buildable stretch, opt into skipping with `run(..., skip_on_error=True)`.
 
-**2. Flaky tests.** `attempts` is the *max* tries, `min_passes` how many must pass; it stops
-as soon as the outcome is locked in:
+**2. Flaky tests, both directions.** To *tolerate* a flake, run a quorum — `attempts` is the
+*max* tries, `min_passes` how many must pass; it stops as soon as the outcome is locked in.
+To *hunt* a rare flake, do the opposite: hammer the test and fail on the first bad run.
+`for_seconds` gives a wall-clock budget instead of a fixed count, and `parallel` runs several
+copies at once for throughput:
 
 ```python
-test("./integration", attempts=5, min_passes=2)   # 2 of up to 5 = good
+test("./integration", attempts=5, min_passes=2)     # tolerate: 2 of up to 5 passes = good
+hammer("./flaky")                                    # hunt: all cores for a minute, any fail = bad
 ```
 
 **3. Benchmarks are just a time-aware predicate.** `passed` receives the `Result` (which
@@ -178,7 +182,7 @@ Requires **Python 3.10+**. No third-party dependencies.
 ## API cheat sheet
 
 ```python
-from bisectlib import (run, test, check, once,
+from bisectlib import (run, test, hammer, check, once,
                        good, bad, skip, abort, replace, fixup, in_range, touches)
 ```
 
@@ -186,6 +190,7 @@ from bisectlib import (run, test, check, once,
 |------|---------|------------|
 | `run(cmd, skip_on_error=False)` | infrastructure (configure/build/setup) | **abort** (or skip) |
 | `test(cmd, attempts=1, min_passes=None, passed=None, warmup=0, bad_when="fail")` | the verdict | **bad** |
+| `hammer(cmd, for_seconds=60, parallel=<all cores>, passed=None, bad_when="fail")` | hunt a rare flake: run till one fails | **bad** |
 | `check(cmd) -> Result` | run once, **never exits** — introspect `.ok`, `.out`, `.seconds` | — |
 | `good()` / `bad()` / `skip()` / `abort()` | decide the commit **directly from Python** | — |
 
@@ -198,6 +203,10 @@ the outcome — `run` defaults to `abort`, `test` to `skip`.
 > so time-out means bad. (The default `on_timeout="skip"` would route *around* every bad
 > commit and stall the bisect.)
 
+- **`hammer(cmd, for_seconds=…, parallel=…)`** — hunt a rare flake: run the command up to
+  `parallel` at a time (default: **all cores**) for a wall-clock budget (default: **60s**),
+  **bad on the first failing run**, good if the budget elapses clean. `passed=`/`bad_when=`
+  still define what a failing run is. The report shows total runs, threads used, and runtime.
 - **`once(key="setup")`** — run one-time, commit-independent setup (fetch a dependency,
   create a symlink) exactly once across the whole bisect instead of on every commit.
 - **`replace(path, old, new)`** — sed-like edit, auto-reverted. `old` is a literal `str` or a
@@ -252,6 +261,7 @@ Runnable recipes in [`examples/`](examples/):
 |------|-------|
 | `minimal.py` | the simplest recipe: build + test |
 | `flaky_with_fixup.py` | a flaky test (`attempts`/`min_passes`) plus a per-range patch `fixup` |
+| `flaky_hunt.py` | hunt a *rare* flake: hammer a test `parallel`-wide for `for_seconds`, any fail = bad |
 | `perf_regression.py` | a benchmark verdict via a time-aware `passed` predicate + `replace` |
 | `find_when_fixed.py` | `bad_when="pass"` — find when something started *working* |
 | `bisect_on_output.py` | bisect on output *content* (when a warning first appeared) |

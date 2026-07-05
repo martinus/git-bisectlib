@@ -320,6 +320,26 @@ class TestReport(unittest.TestCase):
         self.assertEqual(_report.fmt_duration(3700), "1h 1m")
         self.assertEqual(_report.fmt_duration(90000), "1d 1h 0m")
 
+    def test_short_seconds(self):
+        self.assertEqual(_report.short_seconds(45), "45s")
+        self.assertEqual(_report.short_seconds(60), "1m00s")
+        self.assertEqual(_report.short_seconds(83), "1m23s")
+        self.assertEqual(_report.short_seconds(7325), "2h02m")
+
+    def test_hammer_step_summary(self):
+        # the status-table cell for a hammer verdict shows total runs, threads
+        # used, and total runtime.
+        sc = _report.Sidecar(
+            outcome="good", pending=False,
+            steps=[_report.Step(
+                verb="hammer", cmd="./flaky", code=0, duration_s=60.0,
+                extra={"executed": 12043, "parallel": 32, "elapsed_s": 60.0,
+                       "durations_s": [0.002]})])
+        summary = _report._step_summary(sc)
+        self.assertIn("12043 runs", summary)
+        self.assertIn("32× parallel", summary)
+        self.assertIn("1m00s", summary)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

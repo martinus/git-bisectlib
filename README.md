@@ -151,10 +151,11 @@ under `.bisect/<sha>/`, and — when the search resolves — shows the culprit t
 without another `git show` — then `git bisect reset` puts you back on the branch you
 started from.
 
-> `.bisect/` is registered in the repo's **local** excludes (`.git/info/exclude`, never your
-> tracked `.gitignore`), so it stays out of `git status`, is never committed, and survives
-> the checkouts git does between commits. Point it elsewhere with
-> `configure(logs="…", status_md="…")`.
+> `.bisect/` carries its own `.gitignore` of `*`, so it ignores itself entirely — it stays
+> out of `git status`, is never committed, and survives the checkouts git does between
+> commits, without touching your project's tracked `.gitignore` or `.git/`. Point it
+> elsewhere with `configure(logs="…", status_md="…")` — a relocated dir gets the same
+> `.gitignore`.
 
 ## Install
 

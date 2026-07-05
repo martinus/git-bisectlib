@@ -321,7 +321,13 @@ class TestReport(unittest.TestCase):
         self.assertEqual(_report.fmt_duration(90000), "1d 1h 0m")
 
     def test_short_seconds(self):
-        self.assertEqual(_report.short_seconds(45), "45s")
+        # decimals for short runs, dropping a trailing .0
+        self.assertEqual(_report.short_seconds(0.5), "0.5s")
+        self.assertEqual(_report.short_seconds(0.503), "0.5s")
+        self.assertEqual(_report.short_seconds(9.34), "9.3s")
+        self.assertEqual(_report.short_seconds(12.4), "12.4s")
+        self.assertEqual(_report.short_seconds(45), "45s")     # 45.0 -> "45s"
+        # minute and up: m/s then h/m
         self.assertEqual(_report.short_seconds(60), "1m00s")
         self.assertEqual(_report.short_seconds(83), "1m23s")
         self.assertEqual(_report.short_seconds(7325), "2h02m")

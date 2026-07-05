@@ -443,13 +443,19 @@ def fmt_duration(seconds: int) -> str:
 
 
 def short_seconds(seconds) -> str:
-    """Compact runtime: '45s', '1m03s', '2h05m'. Used for hammer's total wall time."""
+    """Compact runtime: '0.5s', '12.4s', '45s', '1m03s', '2h05m'.
+
+    Used for hammer's total wall time. Sub-minute runs keep one decimal (a short
+    soak reads '0.5s', not a rounded '1s'), dropping a trailing '.0'; from a
+    minute up it switches to m/s then h/m where the fraction stops mattering.
+    """
     try:
-        s = int(round(float(seconds)))
+        sec = float(seconds)
     except (ValueError, TypeError):
         return "?"
-    if s < 60:
-        return f"{s}s"
+    if sec < 60:
+        return f"{sec:.1f}".rstrip("0").rstrip(".") + "s"
+    s = int(round(sec))
     m, s = divmod(s, 60)
     if m < 60:
         return f"{m}m{s:02d}s"

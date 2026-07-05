@@ -304,9 +304,41 @@ if size > 5 * 1024 * 1024:
     bad("binary too big")     # exit 1; reaching the end instead is good
 ```
 
-> **Out of scope (removed):** an anchor-finding helper and a library-driven `bisect(...)`
-> convenience driver were considered but cut — the recipe-as-script model
-> (`git bisect run python recipe.py`) plus manual `git bisect start` is the whole surface.
+> **Out of scope (removed):** a library-driven `bisect(...)` convenience driver was
+> considered but cut — the recipe-as-script model (`git bisect run python recipe.py`) plus
+> manual `git bisect start` is the whole surface. Finding the *good* anchor is **advised, not
+> driven**: see §4.9 (guided mode) — the recipe never runs `git` state-changing commands on
+> your behalf, it only prints the ones for you to copy-paste.
+
+### 4.9 guided mode — hunting for the good anchor
+
+`git bisect` can't binary-search until it has **both** a bad and a good commit. The bad one is
+usually HEAD; the good one you find by walking backwards through history. Guided mode makes
+each manual `python recipe.py` run of that hunt self-explaining — it is **advisory only**
+(prints copy-pasteable commands, changes no git state itself).
+
+**Activation (and the silence guarantee).** Guided output appears **only** when a bisect is
+started, a bad commit is known, and **no good commit exists yet** (`refs/bisect/good-*` empty
+*and* no good in `git bisect log`). Therefore it is silent during the real `git bisect run`
+(both endpoints known) and during a pre-start smoke test (no bisect at all) — the automated
+search is never polluted with next-step spam. This "no good endpoint yet" test is the whole
+trigger; there is deliberately **no** fragile "am I running under `git bisect run`?" sniffing.
+
+**Behaviour when active:**
+
+- **Already-bad guard.** Before the first step runs, if HEAD is a commit git already knows is
+  bad, the recipe is **not executed** (there's nothing to learn) — it exits `0` after printing
+  older candidates to try. `--force` (in `sys.argv`) overrides this and evaluates anyway.
+- **After a verdict**, the finalizer prints the next step for that outcome:
+  - **good** → "you found the good end": `git bisect good` then `git bisect run python recipe.py`.
+  - **bad** → `git bisect bad`, then a few older candidate commits to `git checkout` and re-run.
+  - **skip** → older candidates to try instead.
+  - **abort** (a failed `run()` / uncaught error) → "fix your **build script**" — explicitly
+    *not* a good/bad verdict, upholding §2.1's infrastructure-vs-result distinction.
+- **Candidate commits double the distance.** Anchored at the newest known-bad commit's date,
+  probes step back by ~2× the distance already searched (first hunt: ~1w, 2w, 4w). Each is
+  resolved by date on the bad commit's ancestry (`git rev-list -1 --before=<date> <bad>`), so
+  it is always a valid bisect candidate; probes that fall off the start of history are dropped.
 
 ---
 

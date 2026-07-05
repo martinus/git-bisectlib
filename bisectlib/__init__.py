@@ -30,6 +30,11 @@ Verbs:
                                               (e.g. after measuring with check())
     replace(path, old, new, ...)         sed-like edit, auto-reverted (clean tree)
     fixup(patch=/cherry_pick=, when=)    apply a patch/cherry-pick, auto-reverted
+
+Guided mode (automatic): while a bisect is started with a bad commit but no good
+one yet, running `python recipe.py` by hand prints the copy-pasteable next step —
+older candidate commits to try (distance doubling) until you find the good anchor,
+then the `git bisect run` hand-off. It's silent during a real `git bisect run`.
 """
 from __future__ import annotations
 
@@ -47,6 +52,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, NoReturn, Optional, Union
 
@@ -57,7 +63,7 @@ from typing import Callable, Literal, NoReturn, Optional, Union
 _BadWhen = Literal["fail", "pass"]
 _OnTimeout = Literal["abort", "skip", "bad"]
 
-__version__ = "0.14.5"
+__version__ = "0.15.0"
 
 __all__ = [
     "run", "test", "hammer", "check",       # the verbs
@@ -575,6 +581,7 @@ def _decide(outcome_code: int) -> NoReturn:
 
 
 def _verdict(code: int, msg: str) -> NoReturn:
+    _arm()
     label = _OUTCOME_NAME[code]
     if _use_color():
         sys.stderr.write(f"{_C.get(label, '')}● {label}{_C['reset']} {msg}\n")
@@ -608,6 +615,267 @@ def skip(msg: str = "") -> NoReturn:
 def abort(msg: str = "") -> NoReturn:
     """ABORT the bisect (exit 128) — harness broken; state kept, fix & resume."""
     _verdict(ABORT, msg)
+
+
+# ------------------------------------------------------------------ guided mode
+# Before `git bisect` can binary-search, it needs *both* a bad and a good commit.
+# You usually have the bad one (HEAD, where you noticed the bug) but not the good
+# one — so first you walk backwards through history to find a commit where the bug
+# is absent. Guided mode turns each manual `python recipe.py` run of that hunt into
+# a step with hand-holding: it refuses to re-test a commit git already knows is
+# bad, and after every verdict it prints the exact next command to copy-paste plus
+# a few older candidate commits (each roughly doubling the distance searched) to
+# try next. Once you find the good end and hand off to `git bisect run`, it goes
+# silent — it activates *only* while a bisect is started but has no good commit
+# yet, so it never intrudes on the automated run (both endpoints known) or on a
+# pre-start smoke test (no bisect at all).
+_guided: dict = {}
+
+
+def _bad_shas() -> set:
+    """Every commit git currently knows is bad in this bisect (resolved shas)."""
+    shas: set = set()
+    ref = _git("rev-parse", "--verify", "refs/bisect/bad", check=False)
+    if ref:
+        shas.add(ref)
+    for line in _bisect_log().splitlines():
+        try:
+            parts = shlex.split(line)
+        except ValueError:
+            continue
+        # "git bisect bad <sha>" and "git bisect start <bad> [<good>…]"
+        revs = [a for a in parts[3:] if not a.startswith("-")] if len(parts) >= 4 \
+            and parts[:2] == ["git", "bisect"] else []
+        if not revs:
+            continue
+        if parts[2] in ("bad", "start"):
+            r = _git("rev-parse", "--verify", f"{revs[0]}^{{commit}}", check=False)
+            if r:
+                shas.add(r)
+    return shas
+
+
+def _guided_state() -> dict:
+    """Compute (once) whether we're in the good-hunting phase and the facts the
+    guidance needs: HEAD, whether HEAD is already bad, and the anchor (the newest
+    known-bad commit) that candidate distances are measured back from."""
+    if _guided:
+        return _guided
+    st = {"active": False, "head": None, "head_is_bad": False, "anchor": None,
+          "force": "--force" in sys.argv[1:]}
+    try:
+        if _in_git() and _bisect_log().strip():
+            # A known-good commit means git is already binary-searching for real —
+            # stay out of its way. Check both the good refs and the session anchors.
+            good_refs = _git("for-each-ref", "--format=%(objectname)",
+                             "refs/bisect/good-*", check=False)
+            _, bad0, good0 = _bisect_anchors()
+            if not (good_refs.strip() or good0):
+                anchor = None
+                if bad0:
+                    anchor = _git("rev-parse", "--verify",
+                                  f"{bad0}^{{commit}}", check=False) or None
+                st["active"] = True
+                st["head"] = sha()
+                st["anchor"] = anchor or st["head"]
+                bad = _bad_shas()
+                bad.add(st["anchor"])
+                st["head_is_bad"] = st["head"] in bad
+    except Exception:
+        st["active"] = False
+    _guided.update(st)
+    return _guided
+
+
+def _candidate_commits(n: int = 3) -> list:
+    """Older commits to try next while hunting for a good one, each roughly double
+    the distance back through history. Returns (short, date, subject, days) tuples.
+
+    The step size doubles from what's already been searched: if HEAD sits `d` days
+    before the newest bad commit, the next probes are ~2d, 4d, 8d back (and the
+    very first hunt, d≈0, starts at 1 week → 1w, 2w, 4w). Commits are resolved by
+    date on the bad commit's ancestry, so they're always valid bisect candidates.
+    """
+    g = _guided_state()
+    anchor, head = g.get("anchor"), g.get("head")
+    if not anchor:
+        return []
+    try:
+        anchor_ts = int(_git("show", "-s", "--format=%ct", anchor))
+    except (RuntimeError, ValueError):
+        return []
+    d_days = 0.0
+    try:
+        head_ts = int(_git("show", "-s", "--format=%ct", head))
+        d_days = max(0.0, (anchor_ts - head_ts) / 86400.0)
+    except (RuntimeError, ValueError):
+        pass
+    step = 7.0 if d_days < 7.0 else d_days * 2.0
+    out: list = []
+    seen = {head, anchor}
+    tries = 0
+    while len(out) < n and tries < n + 8:
+        tries += 1
+        days = step
+        step *= 2.0
+        target = anchor_ts - days * 86400.0
+        iso = datetime.fromtimestamp(target, tz=timezone.utc).isoformat()
+        sha_ = _git("rev-list", "-1", f"--before={iso}", anchor, check=False)
+        if not sha_ or sha_ in seen:
+            continue  # off the end of history, or same commit as a nearer probe
+        seen.add(sha_)
+        try:
+            short, date, subject = _git(
+                "show", "-s", "--format=%h%x09%cs%x09%s", sha_).split("\t", 2)
+        except (RuntimeError, ValueError):
+            short, date, subject = sha_[:9], "", ""
+        out.append((short, date, subject, int(round(days))))
+    return out
+
+
+# guided output — colored, copy-pasteable next steps -------------------------
+_GW = 74  # width of the horizontal rules
+
+
+def _g_rule(label: str, color: str) -> str:
+    if not label:
+        bar = "━" * _GW if _use_color() else "─" * _GW
+        return f"{color}{bar}{_C['reset']}" if _use_color() else bar
+    if _use_color():
+        return f"{color}{'━' * 3} {label} {'━' * max(0, _GW - 5 - len(label))}{_C['reset']}"
+    return f"── {label} " + "─" * max(0, _GW - 5 - len(label))
+
+
+def _g_text(s: str) -> str:
+    return f"  {s}"
+
+
+def _g_head(mark: str, text: str, color: str) -> str:
+    """A verdict headline: a colored mark (✓/✗/●/⚠) followed by plain text."""
+    if _use_color():
+        return f"  {color}{mark}{_C['reset']} {text}"
+    return f"  {mark} {text}"
+
+
+def _g_cmd(line: str, comment: str = "") -> str:
+    if _use_color():
+        s = f"    {_C['run']}{line}{_C['reset']}"
+        if comment:
+            s += f"   {_C['dim']}# {comment}{_C['reset']}"
+    else:
+        s = f"    {line}" + (f"   # {comment}" if comment else "")
+    return s
+
+
+def _g_candidate_lines() -> list:
+    """`git checkout` lines for the older commits to try next, or a note that we've
+    reached the start of history."""
+    cands = _candidate_commits()
+    if not cands:
+        return [_g_text("Reached the start of history — the oldest commit is your"),
+                _g_text("best bet for GOOD. Check it out; if the recipe passes there,"),
+                _g_text("run `git bisect good`.")]
+    lines = []
+    for short, date, subject, days in cands:
+        subj = (subject[:44] + "…") if len(subject) > 45 else subject
+        meta = " ".join(x for x in (date, subj) if x)
+        tail = f"{meta}  (~{days}d before bad)" if meta else f"~{days}d before bad"
+        lines.append(_g_cmd(f"git checkout {short}", tail))
+    return lines
+
+
+# Per-verdict guidance, printed when a manual run happens during the good-hunt.
+# Each entry: rule label, its color key, the headline (mark + text), then the body
+# lines. RERUN/CANDIDATES/BLANK are placeholders expanded by _guided_print.
+_RERUN = object()       # "python recipe.py  # run again after checking out"
+_CANDIDATES = object()  # the git-checkout candidate list
+
+
+def _guided_print(kind: str) -> None:
+    short = (_guided.get("head") or "")[:9]
+    recipe = f"python {sys.argv[0] or 'recipe.py'}"
+    specs = {
+        "good": ("found a good commit", "good",
+                 ("✓", f"GOOD — the bug is ABSENT here ({short}).", "good"), [
+            _g_text("You found the good end of the range. Let git bisect take over:"),
+            "",
+            _g_cmd("git bisect good"),
+            _g_cmd(f"git bisect run {recipe}")]),
+        "bad": ("bug still present — keep hunting for a good commit", "bad",
+                ("✗", f"BAD — the bug is present here ({short}).", "bad"), [
+            _g_text("Record it, then test an older commit — where was the bug absent?"),
+            "",
+            _g_cmd("git bisect bad"),
+            "",
+            _g_text("Check out one of these older commits and run the recipe again:"),
+            _CANDIDATES, "", _RERUN]),
+        "skip": ("commit can't be judged — try another", "skip",
+                 ("●", f"SKIP — this commit can't be tested ({short}).", "skip"), [
+            _g_text("Try an older commit instead:"),
+            _CANDIDATES, "", _RERUN]),
+        "abort": ("build/setup failed — fix the recipe", "abort",
+                  ("⚠", "The build or setup step failed.", "abort"), [
+            _g_text("That's an infrastructure problem, not a good/bad verdict — git"),
+            _g_text("bisect would be misled if this counted as a result."),
+            _g_text("Fix your build script (the recipe), then run it again:"),
+            "",
+            _g_cmd(recipe)]),
+        "already_bad": ("already marked bad — skipping", "skip",
+                        ("●", f"HEAD ({short}) is already marked BAD — nothing to test.",
+                         "skip"), [
+            _g_text("To find a GOOD commit, check out an older one and run it there:"),
+            _CANDIDATES, "", _RERUN,
+            _g_text(f"(Use  {recipe} --force  to evaluate this commit anyway.)")]),
+    }
+    if kind not in specs:
+        return
+    label, rule_color, (mark, text, mark_color), body = specs[kind]
+    lines = [_g_rule(label, _C[rule_color]), _g_head(mark, text, _C[mark_color])]
+    for item in body:
+        if item is _RERUN:
+            lines.append(_g_cmd(recipe, "run again after checking out"))
+        elif item is _CANDIDATES:
+            lines.extend(_g_candidate_lines())
+        else:
+            lines.append(item)
+    lines.append(_g_rule("", _C[rule_color]))
+    sys.stderr.write("\n" + "\n".join(lines) + "\n")
+    sys.stderr.flush()
+
+
+def _arm() -> None:
+    """Guided-mode precheck, run once before the first recipe step executes.
+
+    Refuses to re-evaluate a commit git already knows is bad (there's nothing to
+    learn), printing where to go instead — unless ``--force`` was passed.
+    """
+    if _guided.get("_armed"):
+        return
+    g = _guided_state()
+    _guided["_armed"] = True
+    if g["active"] and g["head_is_bad"] and not g["force"]:
+        _guided["_handled"] = True
+        _guided_print("already_bad")
+        # Nothing was evaluated: exit straight away without touching status.md or
+        # writing a verdict sidecar (os._exit skips the atexit finalize).
+        os._exit(0)
+
+
+def _guided_finish() -> None:
+    """After a real verdict in the good-hunting phase, print the next step."""
+    g = _guided_state()
+    if not g["active"] or _guided.get("_handled"):
+        return
+    _guided["_handled"] = True
+    # Normally _arm() has already skipped an already-bad HEAD before any step ran;
+    # this only catches the degenerate recipe with no steps at all, which falls off
+    # the end as "good" — don't misreport an already-bad commit as a good find.
+    if g["head_is_bad"] and not g["force"]:
+        _guided_print("already_bad")
+        return
+    kind = {GOOD: "good", BAD: "bad", SKIP: "skip", ABORT: "abort"}.get(_final.get("code"))
+    if kind:
+        _guided_print(kind)
 
 
 # -------------------------------------------------------------------- run/test
@@ -660,6 +928,7 @@ def run(cmd: str, *, skip_on_error: bool = False, timeout: Optional[float] = Non
     ``cwd`` sets the working directory (relative to the repo root; absolute paths
     honoured); defaults to the repo root or ``configure(cwd=…)``.
     """
+    _arm()
     _one_of("on_timeout", on_timeout, ("abort", "skip", "bad"))
     _echo_start("run", cmd)
     log_name = f"{len(_steps)+1:02d}-run-{_slug(cmd)}.log"
@@ -721,6 +990,7 @@ def test(cmd: str, *, attempts: int = 1, min_passes: Optional[int] = None,
     bad would silently mis-bisect. (A crash/signal, exit ``>=128``, stays BAD — it
     may be the regression itself.)
     """
+    _arm()
     _one_of("bad_when", bad_when, ("fail", "pass"))
     _one_of("on_timeout", on_timeout, ("skip", "bad", "abort"))
     if attempts < 1:
@@ -844,6 +1114,7 @@ def hammer(cmd: str, *, for_seconds: float = 60.0, parallel: Optional[int] = Non
     """
     import concurrent.futures as cf
 
+    _arm()
     _one_of("bad_when", bad_when, ("fail", "pass"))
     _one_of("on_timeout", on_timeout, ("skip", "bad", "abort"))
     if parallel is None:
@@ -981,6 +1252,7 @@ def hammer(cmd: str, *, for_seconds: float = 60.0, parallel: Optional[int] = Non
 def check(cmd: str, *, timeout: Optional[float] = None,
           cwd: Optional[str] = None) -> Result:
     """Run once and return the Result. NEVER exits the process."""
+    _arm()
     _echo_start("check", cmd)
     log_name = f"{len(_steps)+1:02d}-check-{_slug(cmd)}.log"
     _begin_step("check", cmd, log_name)
@@ -1232,6 +1504,10 @@ def _finalize() -> None:
                 pass
     _write_sidecar()
     _refresh_status_md(decided=True)
+    # In the good-hunting phase (bad known, good not yet), print the copy-pasteable
+    # next step for this verdict. No-op during a real `git bisect run` or a
+    # pre-start smoke test, so it never intrudes on the automated search.
+    _guided_finish()
 
 
 def _excepthook(exc_type, exc, tb):

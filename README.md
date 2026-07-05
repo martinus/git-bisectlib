@@ -257,6 +257,57 @@ git bisect run python recipe.py     # SAME command → re-tests the current comm
 
 If it was really just *this one commit* being untestable, `git bisect skip` and carry on.
 
+## Don't know a good commit yet? Let the recipe guide you
+
+`git bisect` needs *two* endpoints — a bad commit **and** a good one. You almost always have
+the bad one (HEAD, where you hit the bug); the good one you have to go find. bisectlib turns
+that hunt into a guided loop: run the **same recipe** by hand and it tells you exactly what
+to do next.
+
+```sh
+git bisect start
+git bisect bad            # HEAD has the bug
+python recipe.py          # ← run the recipe yourself
+```
+
+Because HEAD is already known-bad, the recipe **doesn't waste time re-testing it** — it
+points you at older commits instead (each roughly **doubling** the distance back: ~1 week,
+~2 weeks, ~1 month, …), with copy-pasteable commands:
+
+```text
+━━━ already marked bad — skipping ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ● HEAD (11be95b6e) is already marked BAD — nothing to test here.
+  To find a GOOD commit, check out an older one and run the recipe there:
+    git checkout 703164b   # 2024-04-21 commit 37  (~7d before bad)
+    git checkout 66eedd4   # 2024-04-15 commit 35  (~14d before bad)
+    git checkout 0dffdd7   # 2024-03-31 commit 30  (~28d before bad)
+
+    python recipe.py       # run again after checking out
+```
+
+Check out one and run again. If the bug is **still there**, the recipe says so and offers the
+next (doubled) batch of even older candidates — mark it `git bisect bad` and keep going. The
+moment you land on a commit where the bug is **gone**, it hands the search back to git:
+
+```text
+━━━ found a good commit ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ GOOD — the bug is ABSENT here (948739999).
+  You found the good end of the range. Let git bisect take over:
+
+    git bisect good
+    git bisect run python recipe.py
+```
+
+From here it's the normal automated bisect. A few things worth knowing:
+
+- **It's the same recipe, unchanged.** Guidance activates *only* while a bisect is started
+  but has no good commit yet. During the real `git bisect run` (both endpoints known) and
+  during a pre-start smoke test (no bisect at all) it stays completely silent.
+- **A broken build still aborts.** If a candidate doesn't build, `run()` aborts as always and
+  tells you to **fix the build script** — it is never mistaken for a good/bad verdict.
+- **`--force`** re-evaluates the current commit even when it's already marked bad:
+  `python recipe.py --force`.
+
 ## Examples
 
 Runnable recipes in [`examples/`](examples/):

@@ -2,6 +2,7 @@
 clean-tree guarantee, and the eval.json sidecar."""
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -822,6 +823,129 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(Path(d, "junk.txt").exists(), "untracked junk not cleaned")
         self.assertTrue(Path(d, ".bisect").exists(), ".bisect/ must survive clean")
+
+
+def make_history_repo(n=40, step_days=3):
+    """A repo of `n` empty commits, one every `step_days` days, so guided-mode
+    candidate suggestions (which resolve commits by date) have real history to
+    walk. Returns (dir, [sha oldest→newest])."""
+    import datetime
+    d = tempfile.mkdtemp(prefix="bisectlib-guided-")
+    sh(d, "git", "init", "-q")
+    sh(d, "git", "config", "user.email", "t@t.t")
+    sh(d, "git", "config", "user.name", "T")
+    base = datetime.datetime(2024, 1, 1, 12, 0, 0)
+    shas = []
+    for i in range(1, n + 1):
+        dt = (base + datetime.timedelta(days=i * step_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        sh(d, "git", "commit", "-q", "--allow-empty", "-m", f"commit {i}",
+           env={"GIT_AUTHOR_DATE": dt, "GIT_COMMITTER_DATE": dt})
+        shas.append(sh(d, "git", "rev-parse", "HEAD").stdout.strip())
+    return d, shas
+
+
+def run_guided(repo, body, *args):
+    """Write and run a recipe (with optional extra argv), returning (code, stderr)."""
+    Path(repo, "recipe.py").write_text(
+        "import sys\nsys.path.insert(0, %r)\n" % str(ROOT) + body)
+    env = {"PYTHONPATH": str(ROOT), "NO_COLOR": "1"}
+    p = subprocess.run([sys.executable, "recipe.py", *args], cwd=repo,
+                       capture_output=True, text=True, env={**os.environ, **env})
+    return p.returncode, p.stderr
+
+
+class TestGuided(unittest.TestCase):
+    """Guided mode: the hand-holding that only kicks in while hunting for a good
+    commit (a bisect is started, a bad commit is known, but no good one yet)."""
+
+    GOOD = "import bisectlib as b\nb.test('true')\n"
+    BAD = "import bisectlib as b\nb.test('false')\n"
+    INFRA = "import bisectlib as b\nb.run('false')\n"
+
+    def start_bad(self, d):
+        sh(d, "git", "bisect", "start")
+        sh(d, "git", "bisect", "bad")
+
+    def test_already_bad_head_is_skipped(self):
+        # On a commit git already knows is bad there is nothing to learn: don't run
+        # the recipe at all, just point the user at older commits to try.
+        d, _ = make_history_repo()
+        self.start_bad(d)
+        code, err = run_guided(d, self.GOOD)
+        self.assertEqual(code, 0)
+        self.assertIn("already marked BAD", err)
+        self.assertIn("git checkout", err)
+        self.assertIn("--force", err)
+        self.assertNotIn("test  true", err)  # the recipe's step never executed
+
+    def test_force_evaluates_bad_head(self):
+        # --force overrides the already-bad skip and actually runs the recipe.
+        d, _ = make_history_repo()
+        self.start_bad(d)
+        code, err = run_guided(d, self.BAD, "--force")
+        self.assertEqual(code, 1)
+        self.assertIn("test  false", err)              # it really ran
+        self.assertIn("keep hunting", err)             # bad-verdict guidance
+
+    def test_good_verdict_hands_off_to_bisect_run(self):
+        # A good commit found during the hunt → tell the user to mark it good and
+        # let `git bisect run` take over the binary search.
+        d, shas = make_history_repo()
+        self.start_bad(d)
+        sh(d, "git", "checkout", "-q", shas[10])       # older, untested commit
+        code, err = run_guided(d, self.GOOD)
+        self.assertEqual(code, 0)
+        self.assertIn("found a good commit", err)
+        self.assertIn("git bisect good", err)
+        self.assertIn("git bisect run python recipe.py", err)
+
+    def test_bad_verdict_suggests_older_candidates(self):
+        d, shas = make_history_repo()
+        self.start_bad(d)
+        sh(d, "git", "checkout", "-q", shas[20])
+        code, err = run_guided(d, self.BAD)
+        self.assertEqual(code, 1)
+        self.assertIn("git bisect bad", err)
+        self.assertIn("git checkout", err)
+
+    def test_infra_failure_says_fix_the_build(self):
+        # A failing run() aborts (128) — an infrastructure problem, not a verdict.
+        d, shas = make_history_repo()
+        self.start_bad(d)
+        sh(d, "git", "checkout", "-q", shas[20])
+        code, err = run_guided(d, self.INFRA)
+        self.assertEqual(code, 128)
+        self.assertIn("build", err.lower())
+        self.assertIn("fix your build script", err.lower())
+
+    def test_candidates_double_the_distance(self):
+        # First hunt (HEAD == the bad commit): probes start at ~1 week and double.
+        d, _ = make_history_repo()
+        self.start_bad(d)
+        _, err = run_guided(d, self.GOOD)
+        days = [int(m) for m in re.findall(r"~(\d+)d before bad", err)]
+        self.assertEqual(days, [7, 14, 28])
+
+    def test_silent_when_good_is_known(self):
+        # Once a good commit exists, git is doing the real binary search — guided
+        # mode must stay completely silent (no next-step spam on every commit).
+        d, shas = make_history_repo()
+        sh(d, "git", "bisect", "start")
+        sh(d, "git", "bisect", "bad")
+        sh(d, "git", "bisect", "good", shas[0])        # good now known
+        code, err = run_guided(d, self.GOOD)
+        self.assertEqual(code, 0)
+        self.assertNotIn("found a good commit", err)
+        self.assertNotIn("keep hunting", err)
+
+    def test_silent_without_a_bisect(self):
+        # A plain pre-start smoke test (no bisect at all) behaves exactly as before.
+        d, shas = make_history_repo()
+        sh(d, "git", "checkout", "-q", shas[-1])
+        code, err = run_guided(d, self.GOOD)
+        self.assertEqual(code, 0)
+        self.assertNotIn("found a good commit", err)
+        self.assertNotIn("already marked BAD", err)
 
 
 if __name__ == "__main__":

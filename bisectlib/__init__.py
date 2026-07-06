@@ -33,9 +33,10 @@ Verbs:
 
 Guided mode (automatic): while a bisect is started with a bad commit but no good
 one yet, running `python recipe.py` by hand prints the copy-pasteable next step —
-older candidate commits to try (doubling the number of commits skipped) until you
-find the good anchor, then the `git bisect run` hand-off. A commit that won't build
-offers a direction choice rather than a verdict. Silent during real `git bisect run`.
+older candidate commits to try (spaced by a widening time schedule: a day, a week,
+a month, …) until you find the good anchor, then the `git bisect run` hand-off. A
+commit that won't build offers a direction choice rather than a verdict. Silent
+during a real `git bisect run`.
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ from typing import Callable, Literal, NoReturn, Optional, Union
 _BadWhen = Literal["fail", "pass"]
 _OnTimeout = Literal["abort", "skip", "bad"]
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 __all__ = [
     "run", "test", "hammer", "check",       # the verbs
@@ -716,38 +717,71 @@ def _searched_depth() -> int:
     return int(c) if c.isdigit() else 0
 
 
-def _candidate_commits(n: int = 3) -> list:
-    """Older commits to try next while hunting for a good one, each doubling the
-    number of commits skipped. Returns (short, date, subject, dist) tuples where
-    ``dist`` is how many commits back from HEAD the candidate is.
+# The hunt for a good commit walks back through *time* — commit density is too
+# uneven for "N commits back" to feel predictable, and thinking in calendar
+# distance ("try a month ago") is how people actually reason about regressions.
+# The schedule widens: a day, a week, two weeks, a month, two months, then
+# doubling out to years, so a handful of probes span a huge range of history.
+_TIME_OFFSETS_DAYS = (1, 7, 14, 30, 60, 120, 240, 365, 730, 1460)
 
-    Commit count — not calendar time — is the metric that governs bisect (it sets
-    the number of steps), and commit density is far too uneven for time to be a
-    good proxy. So the probes step back by commit count and double each time:
-    HEAD~s, HEAD~2s, HEAD~4s, where ``s`` is the depth already searched (1 on the
-    first hunt → parent, then 2, 4, …). Walking first-parent keeps probes on the
-    mainline and always yields a valid ancestor to bisect from; a probe past the
-    root of history is simply dropped.
-    """
+
+def _candidate_shas() -> list:
+    """Older commits to try next, spaced by the widening time schedule back from
+    HEAD's commit date. Deduped, nearest first, ancestors of HEAD only, dropping
+    any offset that lands past the start of history."""
     g = _guided_state()
     head = g.get("head")
     if not head:
         return []
-    step = max(1, _searched_depth())
+    try:
+        head_ts = int(_git("show", "-s", "--format=%ct", head))
+    except (RuntimeError, ValueError):
+        return []
     out: list = []
     seen: set = set()
-    dist = step
-    tries = 0
-    while len(out) < n and tries < n + 8:
-        tries += 1
-        this, dist = dist, dist * 2
-        meta = _commit_meta(f"{head}~{this}")
-        if not meta or meta[0] in seen:
-            continue  # off the end of history, or same commit as a nearer probe
-        seen.add(meta[0])
-        _, short, date, subject = meta
-        out.append((short, date, subject, this))
+    for days in _TIME_OFFSETS_DAYS:
+        target = head_ts - days * 86400
+        iso = datetime.fromtimestamp(target, tz=timezone.utc).isoformat()
+        sha_ = _git("rev-list", "-1", f"--before={iso}", head, check=False)
+        if sha_ and sha_ != head and sha_ not in seen:
+            seen.add(sha_)
+            out.append(sha_)
     return out
+
+
+# The one-line-per-commit format the report/guidance render candidates with:
+# short sha, committer date, relative age (padded), refs, subject, author.
+_LOG_FMT = ("%C(auto)%h %Cgreen%cs %C(green bold)%<(12)%cr"
+            "%C(auto)%d %s %C(bold blue)<%an>%Creset")
+
+
+def _log_lines(shas: list) -> list:
+    """Render `shas` (in the given order) as indented `git log` one-liners, colored
+    to match the terminal. Falls back to bare shas if the format ever fails."""
+    if not shas:
+        return []
+    color = "always" if _use_color() else "never"
+    out = _git("log", "--no-walk=unsorted", f"--color={color}",
+               f"--pretty=format:{_LOG_FMT}", *shas, check=False)
+    lines = out.splitlines() if out else []
+    if not lines:
+        lines = [s[:9] for s in shas]
+    return ["    " + ln for ln in lines]
+
+
+def _newer_sha() -> Optional[str]:
+    """A commit between HEAD and the newest-bad anchor — used only by the build-break
+    menu, to offer a *newer* (likelier-to-build) direction. None if the bad range is
+    empty (HEAD is the anchor) or it can't be resolved."""
+    g = _guided_state()
+    anchor, head = g.get("anchor"), g.get("head")
+    depth = _searched_depth()
+    if not anchor or depth < 2:
+        return None
+    meta = _commit_meta(f"{anchor}~{depth // 2}")
+    if not meta or meta[0] in (head, anchor):
+        return None
+    return meta[0]
 
 
 # guided output — colored, copy-pasteable next steps -------------------------
@@ -785,22 +819,14 @@ def _g_cmd(line: str, comment: str = "") -> str:
 
 
 def _g_candidate_lines() -> list:
-    """`git checkout` lines for the older commits to try next, or a note that we've
-    reached the start of history."""
-    cands = _candidate_commits()
+    """The older commits to try next, as `git log` one-liners (copy the sha into
+    `git checkout`), or a note that we've reached the start of history."""
+    cands = _candidate_shas()
     if not cands:
         return [_g_text("Reached the start of history — the oldest commit is your"),
                 _g_text("best bet for GOOD. Check it out; if the recipe passes there,"),
                 _g_text("run `git bisect good`.")]
-    lines = []
-    for short, date, subject, dist in cands:
-        subj = (subject[:40] + "…") if len(subject) > 41 else subject
-        meta = " ".join(x for x in (date, subj) if x)
-        plural = "commit" if dist == 1 else "commits"
-        tail = (f"{meta}  ({dist} {plural} back)" if meta
-                else f"{dist} {plural} back")
-        lines.append(_g_cmd(f"git checkout {short}", tail))
-    return lines
+    return _log_lines(cands)
 
 
 # Per-verdict guidance, printed when a manual run happens during the good-hunt.
@@ -826,11 +852,11 @@ def _guided_print(kind: str) -> None:
             "",
             _g_cmd("git bisect bad"),
             "",
-            _g_text("Check out one of these older commits and run the recipe again:"),
+            _g_text("git checkout one of these older commits and run the recipe again:"),
             _CANDIDATES, "", _RERUN]),
         "skip": ("commit can't be judged — try another", "skip",
                  ("●", f"SKIP — this commit can't be tested ({short}).", "skip"), [
-            _g_text("Try an older commit instead:"),
+            _g_text("git checkout an older commit instead:"),
             _CANDIDATES, "", _RERUN]),
         "abort": ("recipe error — fix the recipe", "abort",
                   ("⚠", "The recipe hit an error — not a good/bad verdict.", "abort"), [
@@ -841,7 +867,7 @@ def _guided_print(kind: str) -> None:
         "already_bad": ("already marked bad — skipping", "skip",
                         ("●", f"HEAD ({short}) is already marked BAD — nothing to test.",
                          "skip"), [
-            _g_text("To find a GOOD commit, check out an older one and run it there:"),
+            _g_text("To find a GOOD commit, git checkout an older one and run it there:"),
             _CANDIDATES, "", _RERUN,
             _g_text(f"(Use  {recipe} --force  to evaluate this commit anyway.)")]),
     }
@@ -859,17 +885,6 @@ def _guided_print(kind: str) -> None:
     lines.append(_g_rule("", _C[rule_color]))
     sys.stderr.write("\n" + "\n".join(lines) + "\n")
     sys.stderr.flush()
-
-
-def _g_checkout(rev: str, note: str) -> Optional[str]:
-    """A `git checkout` line for `rev` prefixed with a direction note, or None."""
-    meta = _commit_meta(rev)
-    if not meta:
-        return None
-    _, short, date, subject = meta
-    subj = (subject[:34] + "…") if len(subject) > 35 else subject
-    tail = " ".join(x for x in (date, subj) if x)
-    return _g_cmd(f"git checkout {short}", f"{note} — {tail}" if tail else note)
 
 
 def _guided_build_break() -> None:
@@ -890,17 +905,14 @@ def _guided_build_break() -> None:
     lines = [_g_rule("can't build this commit — you decide where to go", color),
              _g_head("⚠", f"{what} — this commit won't build.", color),
              _g_text("An unbuildable commit is neither good nor bad; nothing was"),
-             _g_text("recorded. Choose a direction and re-run:"),
-             ""]
-    older = _g_checkout(f"{_guided.get('head')}~{max(1, _searched_depth())}",
-                        "OLDER, jump past the break")
-    lines.append(older or _g_text("(no older commit — you're at the start of history)"))
-    depth = _searched_depth()
-    if depth >= 2:
-        newer = _g_checkout(f"{_guided.get('anchor')}~{depth // 2}",
-                            "NEWER, likelier to build")
-        if newer:
-            lines.append(newer)
+             _g_text("recorded. git checkout a commit and re-run — your call which way:"),
+             "",
+             _g_text("OLDER — jump past the break (often toolchain drift):")]
+    lines += _g_candidate_lines()
+    newer = _newer_sha()
+    if newer:
+        lines += ["", _g_text("NEWER — come back toward code that builds:")]
+        lines += _log_lines([newer])
     lines += ["", _g_cmd(recipe, "run again after checking out"), "",
               _g_text("If instead the recipe/build script is what's broken (not the"),
               _g_text("commit), fix it and re-run — or let the recipe route around"),

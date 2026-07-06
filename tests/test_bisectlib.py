@@ -945,15 +945,14 @@ class TestGuided(unittest.TestCase):
         self.assertIn("OLDER", err)
         self.assertNotIn("NEWER", err)
 
-    def test_candidates_double_the_commit_count(self):
-        # First hunt (HEAD == the bad commit): probes step back by commit count and
-        # double — the parent, then 2, then 4 commits back — each shown with a date.
-        d, _ = make_history_repo()
+    def test_candidates_are_time_spaced_with_age(self):
+        # First hunt: several older commits, spaced by a widening time schedule and
+        # rendered git-log style — short sha, date, and relative age ("N unit ago").
+        d, _ = make_history_repo(120)                  # enough history for many probes
         self.start_bad(d)
         _, err = run_guided(d, self.GOOD)
-        dist = [int(m) for m in re.findall(r"\((\d+) commits? back\)", err)]
-        self.assertEqual(dist, [1, 2, 4])
-        self.assertRegex(err, r"\d{4}-\d{2}-\d{2}")    # dates shown alongside
+        rows = re.findall(r"^ +[0-9a-f]{7,} \d{4}-\d{2}-\d{2} .*ago", err, re.M)
+        self.assertGreaterEqual(len(rows), 5)          # "many more" than the old three
 
     def test_silent_when_good_is_known(self):
         # Once a good commit exists, git is doing the real binary search — guided

@@ -65,7 +65,7 @@ from typing import Callable, Literal, NoReturn, Optional, Union
 _BadWhen = Literal["fail", "pass"]
 _OnTimeout = Literal["abort", "skip", "bad"]
 
-__version__ = "0.16.1"
+__version__ = "0.16.2"
 
 __all__ = [
     "run", "test", "hammer", "check",       # the verbs

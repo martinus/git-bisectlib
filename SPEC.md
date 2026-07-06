@@ -342,13 +342,15 @@ trigger; there is deliberately **no** fragile "am I running under `git bisect ru
     that builds), plus the reminder that a broken recipe can be fixed or made to route around
     the commit with `run(…, skip_on_error=True)`. The user decides — the library never marks
     the commit or moves HEAD.
-- **Candidate commits double the commit count.** Commit count — not calendar time — is what
-  governs a bisect (it sets the number of steps), and commit density is too uneven for time to
-  be a good proxy. Probes step back by commit count and double: `HEAD~s`, `HEAD~2s`, `HEAD~4s`,
-  where `s` is the depth already searched (`git rev-list --count HEAD..<newest-bad>`; 1 on the
-  first hunt). Walking first-parent keeps probes on the mainline and always yields a valid
-  ancestor to bisect from; a probe past the root of history is dropped. Each candidate is shown
-  with its committer date for orientation.
+- **Candidate commits follow a widening time schedule.** People reason about regressions in
+  calendar terms ("try a month ago"), so probes step back through *time* from HEAD's commit
+  date on a widening schedule — 1 day, 1 week, 2 weeks, 1 month, 2 months, then doubling out to
+  years (`_TIME_OFFSETS_DAYS`). Each offset resolves to an ancestor of HEAD by date
+  (`git rev-list -1 --before=<date> HEAD`), deduped nearest-first; offsets past the start of
+  history are dropped. Candidates are rendered as `git log` one-liners (short sha, committer
+  date, relative age, subject, author — colored to the terminal) so the user can eyeball where
+  to jump and copy a sha into `git checkout`. The build-failure menu's **older** direction is
+  this same list; **newer** is the commit midway (by count) between HEAD and the newest bad.
 
 ---
 

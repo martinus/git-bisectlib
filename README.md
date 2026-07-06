@@ -271,23 +271,27 @@ python recipe.py          # ← run the recipe yourself
 ```
 
 Because HEAD is already known-bad, the recipe **doesn't waste time re-testing it** — it
-points you at older commits instead. Each probe **doubles the number of commits skipped** (its
-parent, then 2, 4, 8, … commits back — commit count, not calendar time, is what governs a
-bisect), with the commit's date shown for orientation and copy-pasteable commands:
+points you at older commits instead, spaced by a **widening time schedule** (a day back, a
+week, two weeks, a month, two months, then on into years) so a handful of probes span a lot
+of history. Each is shown `git log`-style — short sha, date, how long ago, subject, author —
+so you can eyeball where to jump; copy a sha into `git checkout`:
 
 ```text
 ━━━ already marked bad — skipping ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ● HEAD (11be95b6e) is already marked BAD — nothing to test here.
-  To find a GOOD commit, check out an older one and run the recipe there:
-    git checkout 703164b   # 2024-04-21 commit 39: fix cache eviction   (1 commit back)
-    git checkout 66eedd4   # 2024-04-18 commit 38: refactor loader      (2 commits back)
-    git checkout 0dffdd7   # 2024-04-11 commit 36: bump deps            (4 commits back)
+  ● HEAD (5fa8b7503) is already marked BAD — nothing to test.
+  To find a GOOD commit, git checkout an older one and run it there:
+    ec0acd2 2026-06-30 5 days ago    fix cache eviction        <Martin Leitner-Ankerl>
+    7fb9e4a 2026-06-24 12 days ago   refactor loader           <Martin Leitner-Ankerl>
+    356a26b 2026-06-11 3 weeks ago   bump deps                 <Martin Leitner-Ankerl>
+    c196853 2026-05-27 6 weeks ago   tune scheduler            <Martin Leitner-Ankerl>
+    85fb7c9 2026-05-01 2 months ago  add spec + bisectlog      <Martin Leitner-Ankerl>
+    a59303d 2026-03-02 4 months ago  rework parser             <Martin Leitner-Ankerl>
 
     python recipe.py       # run again after checking out
 ```
 
-Check out one and run again — pick the farthest to gallop, or a nearer one to tread carefully.
-If the bug is **still there**, the recipe says so and offers the next (doubled) batch of even
+Check out one and run again — pick a far one to cover ground fast, or a nearer one to tread
+carefully. If the bug is **still there**, the recipe says so and offers a fresh batch of even
 older candidates — mark it `git bisect bad` and keep going. The moment you land on a commit
 where the bug is **gone**, it hands the search back to git:
 
@@ -315,10 +319,13 @@ From here it's the normal automated bisect. A few things worth knowing:
   ━━━ can't build this commit — you decide where to go ━━━━━━━━━━━━━━━━━━━━
     ⚠ `cmake --build build` failed at 2addbb8b — this commit won't build.
     An unbuildable commit is neither good nor bad; nothing was
-    recorded. Choose a direction and re-run:
+    recorded. git checkout a commit and re-run — your call which way:
 
-      git checkout 9b0f340   # OLDER, jump past the break — 2024-01-07 commit 2
-      git checkout 39b9fba   # NEWER, likelier to build  — 2024-04-03 commit 31
+    OLDER — jump past the break (often toolchain drift):
+      378ac9e 2026-05-01 9 weeks ago  fix cache eviction   <Martin Leitner-Ankerl>
+      50fa29e 2026-04-25 2 months ago tune scheduler       <Martin Leitner-Ankerl>
+    NEWER — come back toward code that builds:
+      1785673 2026-07-02 4 days ago   refactor loader      <Martin Leitner-Ankerl>
 
       python recipe.py       # run again after checking out
   ```

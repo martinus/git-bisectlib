@@ -179,7 +179,12 @@ no install, no `PYTHONPATH`. Keep that copy **untracked** in the repo you're bis
 survives every checkout (commit it and it would vanish on older commits and break the
 import mid-bisect).
 
-Requires **Python 3.10+**. No third-party dependencies.
+Requires **Python 3.10+**. **No third-party dependencies — and that's a guarantee, not
+a coincidence.** `bisectlib` imports only the Python standard library, so installing it
+never pulls a transitive dependency tree onto the machine you're bisecting on. That keeps
+the supply-chain surface as small as it can be — nothing to audit, nothing that can be
+compromised upstream. A test (`tests/test_no_dependencies.py`) enforces it, so a stray
+`import requests` can never sneak in unnoticed.
 
 ## API cheat sheet
 

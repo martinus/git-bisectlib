@@ -694,7 +694,15 @@ test("./run_tests")
    commits.
 
 ### Packaging
-- Standalone repo / pip package, **stdlib only** — no runtime dependencies.
+- Standalone repo / pip package, **stdlib only** — no runtime dependencies. This is a
+  **hard, permanent constraint**, not a current convenience: `bisectlib` must import
+  nothing outside the Python standard library. The tool runs on developers' and CI
+  machines against arbitrary checkouts, so keeping the dependency set empty minimizes the
+  supply-chain attack surface — there is no transitive tree to audit or to be compromised
+  upstream. New features that would need a third-party package must instead be built on the
+  stdlib or left out. A dedicated test (`tests/test_no_dependencies.py`) walks every module
+  the package imports and fails if any of them is not part of the standard library, so a
+  regression is caught in CI rather than at install time.
 - One package: **`bisectlib`** (the recipe engine) with a built-in `bisectlib._report`
   renderer module. Ships a `py.typed` marker so installed usage is fully typed.
 - Python 3.10+ (uses `re.Pattern`, `match`/`Enum`, etc.).
